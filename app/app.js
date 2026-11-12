@@ -584,7 +584,7 @@ function renderExecution(file, e) {
   const attach = `claude attach ${e.session}`;
   const copy = `<button class="btn ghost sm" data-copy="${esc(attach)}" title="Copy, then run it in a terminal to steer the session">Copy</button>`;
   const stop = '<button class="btn ghost sm danger" data-exec="stop" title="End the session. Its changes stay in your working tree.">Stop</button>';
-  const done = '<button class="btn good sm" data-exec="complete" title="You tested and committed it: the next PRD can start">Mark complete</button>';
+  const done = '<button class="btn good sm" data-exec="complete" title="You tested and committed it: the executor’s summary is added to the PRD, and the next PRD can start">Mark complete</button>';
   const line = (cls, body, btns) => `<div class="notes"><div class="note-line exec ${cls}" data-file="${esc(file)}">${body}<span class="exec-btns">${btns}</span></div></div>`;
   const cmd = `<code>${esc(attach)}</code>`;
   // The Claude session id outlives the background agent: resume the run from it once the agent is gone
@@ -601,7 +601,7 @@ function renderExecution(file, e) {
     case 'gone':
       return line('', `<span class="grow">The session is gone. Its changes are in your working tree.${resumeCmd}</span>`, resumeCopy + done + stop);
     case 'complete':
-      return line('', `<span class="grow">Complete.${resumeCmd}</span>`, resumeCopy);
+      return line('', `<span class="grow">Complete.${e.summarized ? ' The executor’s summary is under <b>Execution summary</b> at the end.' : e.summarized === false ? ' No executor summary was found to add.' : ''}${resumeCmd}</span>`, resumeCopy);
     case 'stopped':
       return line('', `<span class="grow">Stopped. Its changes stay in your working tree for you to keep or discard. Finished it yourself? Mark it complete.${resumeCmd}</span>`, resumeCopy + done);
   }

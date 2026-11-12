@@ -51,7 +51,8 @@ order, starting with a walking skeleton of the whole loop. Each holds the outcom
 decisions and acceptance checks for one PR, and points to the context rather than restating it. Once you
 approve them, **Execute** builds one in a background Claude Code session (`claude --bg`) right on your checkout,
 one PRD at a time: you test it, steer it with `claude attach <id>`, commit, and **Mark complete** to free the
-next. Or **Copy prompt** for your own coding agent. Either way the PRD is marked handed off; later updates
+next: the executor's final reply is appended to the PRD as its **Execution summary** (it covers the session's
+work: note anything you changed yourself in the PRD). Or **Copy prompt** for your own coding agent. Either way the PRD is marked handed off; later updates
 leave handed-off PRDs alone and add follow-ups instead. To add a PRD or reshape the set, say so in plain words
 under **Add or change PRDs**; you re-review only what moved. If the context changes, the PRDs are flagged for an
 update.

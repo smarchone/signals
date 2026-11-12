@@ -66,6 +66,40 @@ function runClaude(args, cwd) {
 // A session's state in `claude agents --json`, as an execution status
 const SESSION_STATUS = { working: 'building', blocked: 'blocked', done: 'built' };
 
+// The executor's last reply in a Claude session (its summary of the build), read from the session transcript
+// (<config>/projects/<project>/<session_id>.jsonl). Null if the transcript or a reply can't be found.
+async function lastReply(sessionId) {
+  if (!sessionId) return null;
+  const projects = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
+  let dirs = [];
+  try {
+    dirs = await readdir(projects);
+  } catch {
+    return null;
+  }
+  for (const d of dirs) {
+    let lines;
+    try {
+      lines = (await readFile(path.join(projects, d, `${sessionId}.jsonl`), 'utf8')).split('\n');
+    } catch {
+      continue;
+    }
+    for (const line of lines.reverse()) {
+      if (!line.includes('"assistant"')) continue;
+      try {
+        const m = JSON.parse(line);
+        if (m.type !== 'assistant' || !Array.isArray(m.message?.content)) continue;
+        const text = m.message.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n\n').trim();
+        if (text) return text;
+      } catch {}
+    }
+    return null;
+  }
+  return null;
+}
+// The section a PRD gets when you mark its execution complete: the executor's own summary of what it changed
+const SUMMARY_HEADING = '## Execution summary';
+
 // ---------- Live updates (SSE), shared by all workspaces ----------
 
 const clients = new Set();
@@ -724,7 +758,8 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       return idea.executions[name];
     },
 
-    // Close out an execution: complete (you tested and committed it) or stop (end the session)
+    // Close out an execution: complete (you tested and committed it; the executor's last reply is appended to the
+    // PRD as its Execution summary) or stop (end the session)
     'POST /api/prds/execution': async (_q, b) => {
       const idea = getIdea(b.id);
       const name = docName(docFile(b.file));
@@ -735,7 +770,14 @@ End with a short summary: what changed, how to try it, and how to check each Acc
         if (['building', 'blocked', 'built'].includes(e.status)) await runClaude(['stop', e.session], repo);
         Object.assign(e, { status: 'stopped', at: now() });
       } else if (b.action === 'complete') {
-        Object.assign(e, { status: 'complete', at: now() });
+        const reply = await lastReply(e.session_id);
+        if (reply) {
+          // Shift the reply's own headings below the section's, and replace a summary from an earlier completion
+          const body = reply.replace(/^(#{1,5})(\s)/gm, '$1##$2');
+          const prd = (await readFile(docFile(name), 'utf8')).split(`\n${SUMMARY_HEADING}\n`)[0].trimEnd();
+          await writeFile(docFile(name), `${prd}\n\n${SUMMARY_HEADING}\n\n${body}\n`);
+        }
+        Object.assign(e, { status: 'complete', summarized: Boolean(reply), at: now() });
       } else throw httpError(400, 'action must be complete or stop');
       await save(idea);
       return e;
