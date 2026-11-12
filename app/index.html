@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signals</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='5' fill='%23e8833a'/><circle cx='16' cy='16' r='11' fill='none' stroke='%23e8833a' stroke-width='2' opacity='.5'/></svg>" />
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/purify.min.js"></script>
+</head>
+<body>
+  <aside id="side">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span>Signals</span>
+    </div>
+    <div class="ws-row">
+      <select id="ws" aria-label="Workspace"></select>
+      <button id="remove-ws" class="btn ghost sm icon" title="Unregister this repo">×</button>
+    </div>
+    <div id="presence" class="presence"></div>
+    <button id="new-idea" class="btn primary block">New meeting</button>
+    <nav id="ideas"></nav>
+  </aside>
+  <main id="main"></main>
+  <div id="toast" role="status"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

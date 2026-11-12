@@ -1,0 +1,21 @@
+{
+  "name": "@smarchone/signals",
+  "version": "0.1.0",
+  "description": "The decision plane for building with agents: vet an idea with a panel, make the go/no-go call, and distill opinionated context files your coding agents build from.",
+  "type": "module",
+  "bin": {
+    "signals": "bin/signals.js"
+  },
+  "files": [
+    "server.js",
+    "bin/",
+    "app/"
+  ],
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}
