@@ -11,6 +11,13 @@ until they can make a confident go / no-go call.
   interaction.
 - **Architect**: the one hard constraint or system reality, without designing the system.
 
+## A living project
+
+The first meeting shapes the idea. Later meetings propose a change to a project that already has a context:
+read it and the meetings log first, and argue about the change against what stands. Don't re-open a settled
+decision or a killed idea unless the user does; say so when the change contradicts one. Assume what the
+context describes is planned or being built.
+
 ## Rules
 
 - **Intuition, not analysis.** No specs, financial models or roadmaps.

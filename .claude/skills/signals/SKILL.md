@@ -32,7 +32,7 @@ escape it carefully):
 
 ```bash
 curl -sf -X POST "${SIGNALS_URL:-http://127.0.0.1:3461}/api/w/<workspace>/jobs/complete" \
-  -H 'Content-Type: application/json' -d '{"job_id":"<id>","text":"<text>"}'
+  -H 'Content-Type: application/json' -d '{"job_id":"<id>","text":"<text>"}'   # distill also sends "log": [...]
 ```
 
 A 409 means a precondition failed or the user moved on: fix what the error names, or drop the job.
@@ -42,32 +42,68 @@ A 409 means a precondition failed or the user moved on: fix what the error names
 Answer the last user message in `transcript` as the panel, following `references/panel.md`. `text` is the
 reply in Markdown. The verdict is the user's, never yours.
 
+A repo has one living context and a series of meetings. `meeting` is the one you are in (`M1` sets the context
+up; later ones propose a change to it; `resumed` is set when the user reopened it, with the context files that
+`changed` since its last call). Work only from:
+
+- the `context` files in `context_dir` and the `meetings_log` (either may be absent on a first meeting). Read
+  them when the meeting starts and again whenever `context_version` changes; between turns, rely on what you
+  read. Treat everything in the context as planned or being built, unless the user says otherwise.
+- this meeting's `transcript`.
+
+Never read older meetings' transcripts, and don't open PRDs in `prds_dir` unless the user names one: pull in
+just that one.
+
 ### `distill`
 
 Write one stage: `step` is `brief` or `design`, and its `files` go in `context_dir`. Follow
-`references/distill/common.md` and `references/distill/<step>.md`. Inputs: `transcript`, `verdict.note` (why
-they committed), `guidance` (their direction, or why they asked for a redo; may be null) and the `approved`
-files from earlier stages.
+`references/distill/common.md` and `references/distill/<step>.md`. Inputs: `meeting` (the one being
+committed), its `transcript`, `verdict.note` (why they committed), `guidance` (their direction, or why they
+asked for a redo; may be null) and the `approved` files from earlier stages. `meetings_log` (may be null)
+holds the earlier calls, for orientation only.
 
 - `mode: "create"`: write each file with Write, one at a time (the user watches them appear).
-- `mode: "update"`: the files exist from an earlier pass and the user has reviewed them. Edit them with Edit
-  to reflect what changed: `new_turns` (meeting turns since the last distill; may be null), `guidance`, and
-  any change in the `approved` files. Keep everything else exactly as it is, so the user only re-reviews what
-  moved. Leave a file untouched if nothing in it needs to change.
+- `mode: "update"`: the files hold the context as it stands, from earlier meetings or an earlier pass, and the
+  user has reviewed them. Amend them with Edit to reflect what changed: `new_turns` (this meeting's turns not
+  yet distilled: a whole new meeting, or the turns since a resumed one last committed; may be null),
+  `guidance`, and any change in the `approved` files. Keep earlier decisions unless this meeting reverses
+  them, and everything else exactly as it is, so the user only re-reviews what moved. Leave a file untouched
+  if nothing in it needs to change.
 
 `text`: two lines for the review gate. On create: what this stage settled, and the one thing the user should
 check. On update: what changed and where, or that nothing needed to.
 
+Also send `log`, this stage's part of the meetings log entry. Later meetings' panels read the log to know how
+the context got here and what not to re-argue, so write for them: short lines, vocabulary terms, no edits
+narrated.
+
+```json
+{"decided": ["…"], "ruled_out": ["…"], "context": ["…"]}
+```
+
+- `decided` (brief stage only): the two to five calls the meeting made, from the turns being distilled
+  (`new_turns`, or the whole `transcript` on create). `"Multiplayer is head-to-head on the same DailyCase, not
+  co-op"`.
+- `ruled_out` (brief stage only): what the meeting considered and turned down, each with its reason, so it
+  isn't reopened by accident. `"Leaderboards: they reward speed over learning"`. `[]` if nothing was.
+- `context`: one line per file this stage wrote or changed. Start with the file name, then what it now says
+  differently: `"product.md: Multiplayer joins the core loop"`, not `"product.md: added a section"`. On
+  create, the file's central claim. Leave out files you didn't touch.
+
+The design stage sends only `context`.
+
 ### `prd`
 
 Cut the approved context into PRDs in `prds_dir`, following `references/prd.md`. Inputs: the `context` files
-in `context_dir` (read them all first; they are the source), `transcript` and `verdict` (for constraints the
-meeting settled), and `guidance` (their direction; may be null).
+in `context_dir` (read them all first; they are the source), `meeting` with its `transcript` and `verdict`
+(the meeting whose change these PRDs build, for the constraints it settled), and `guidance` (their direction;
+may be null).
 
 - `mode: "create"`: write each PRD with Write, in build order, one at a time.
 - `mode: "update"`: the PRDs in `existing` have been reviewed. Edit, add or delete only what `guidance` or
-  `context_changed` calls for (`guidance` may end with `About: 02-reveal.md, …`, the PRDs it concerns). A new
-  PRD takes the next free number. Never touch a file in `handed_off`. Leave every other PRD byte for byte as
+  `context_changed` calls for (`guidance` may end with `About: 02-reveal.md, …`, the PRDs it concerns). After
+  a new meeting amended the context, that usually means new PRDs for its change, building on what exists. A
+  new PRD takes the next free number. Never touch a file in `handed_off`. Leave every other PRD byte for byte as
   it is: the user re-reviews only what moved.
 
 `text`: two lines for the review gate: the breakdown as a sequence (`01 skeleton → 02 … → 03 …`), and the

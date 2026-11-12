@@ -1,4 +1,6 @@
-// Signals UI: meeting -> verdict -> distill -> context review -> PRDs. No build step; marked + DOMPurify are globals.
+// Signals UI: meetings -> context -> PRDs -> exec. No build step; marked + DOMPurify are globals.
+// A repo has one living context and a series of meetings (M1, M2, …): the first sets the context up, each later one
+// amends it. Only the latest meeting is active: you talk in it, resume it, or start the next one.
 
 const CONTEXT_FILES = ['business.md', 'product.md', 'model.md', 'vocab.md', 'architecture.md'];
 const FILE_LABEL = { 'product.md': 'Product', 'business.md': 'Business', 'model.md': 'Model', 'vocab.md': 'Vocabulary', 'architecture.md': 'Architecture' };
@@ -17,7 +19,9 @@ const canRedistill = (i) => !i.working && canRefine(i) && !i.refinements.some((r
 // PRDs: the plan layer, cut from the distilled context. Named by relative path (prds/01-skeleton.md).
 const isPrd = (name) => String(name).startsWith('prds/');
 const reviewingPrds = (i) => i.stage === 'distilled' && i.prd?.status === 'review';
-const canRefineDoc = (i, name) => (isPrd(name) ? ['review', 'done'].includes(i.prd?.status) && !prdLocked(i, name) : canRefine(i));
+const LOG = 'meetings.md'; // the meetings log: read only, written by the daemon at each call
+const cur = (i) => i.meetings.at(-1);
+const canRefineDoc = (i, name) => name === LOG ? false : (isPrd(name) ? ['review', 'done'].includes(i.prd?.status) && !prdLocked(i, name) : canRefine(i));
 // A PRD being executed, or complete, is what was built: it stays as it is (a stopped one can still change)
 const prdLocked = (i, name) => ['building', 'blocked', 'built', 'gone', 'complete'].includes(i.executions?.[name]?.status);
 const prdsPending = (i) => i.refinements.some((r) => r.status === 'pending' && isPrd(r.file));
@@ -67,7 +71,7 @@ function toast(text, ms = 2600) {
 }
 const fail = (err) => toast(err.message || String(err));
 
-// ---------- Routing: #/<repo>/meeting, #/<repo>/context[/<file>] or #/<repo>/prds[/<file>] — a repo has one idea, so the repo is the address ----------
+// ---------- Routing: #/<repo>/meeting[/<M2|new>], #/<repo>/context[/<file>] or #/<repo>/prds[/<file>] ----------
 
 function parseRoute() {
   const [ws, tab, file] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
@@ -80,7 +84,7 @@ function goIndex() {
 }
 function go(r) {
   const next = { ...S.route, ...r };
-  const parts = [next.ws, next.ws && next.tab, next.tab !== 'meeting' && next.file].filter(Boolean);
+  const parts = [next.ws, next.ws && next.tab, next.file].filter(Boolean);
   const hash = `#/${parts.map(encodeURIComponent).join('/')}`;
   if (location.hash === hash) onRoute(); // same address: re-render instead of waiting for a hashchange
   else location.hash = hash;
@@ -113,7 +117,7 @@ async function loadIdeas() {
   if (!S.ws) return (S.ideas = []);
   S.ideas = (await wsApi('GET', '/api/ideas')).ideas;
 }
-// The repo's one idea, if it has one
+// The repo's project: its meetings, context and PRDs
 async function loadIdea() {
   const id = S.ideas[0]?.id;
   try {
@@ -125,7 +129,7 @@ async function loadIdea() {
 
 // ---------- Sidebar ----------
 
-// One row per repo, each with its one idea (or none yet)
+// One row per repo, with where its latest meeting stands
 function ideaStatus(i) {
   if (!i) return { text: 'No idea yet: start a meeting', cls: 'you' };
   if (i.working === 'panel') return { text: 'Panel is conferring…', busy: true };
@@ -156,7 +160,7 @@ function renderIndex(main) {
         <button class="ws-card" data-repo="${esc(w.id)}">
           ${FOLDER_ICON}
           <span class="ws-main"><span class="ws-card-name">${esc(w.name)}</span><span class="ws-card-path">${esc(w.path || w.repo)}</span></span>
-          <span class="ws-idea">${w.idea ? esc(w.idea.title) : ''}</span>
+          <span class="ws-idea">${w.idea ? `${esc(w.idea.title)}${w.idea.meeting_count > 1 ? ` · ${esc(w.idea.meeting.id)}` : ''}` : ''}</span>
           <span class="ws-card-status ${st?.cls || ''}">${esc(st?.text || (w.idea?.prd?.status === 'done' ? 'PRDs ready to hand off' : w.idea?.stage === 'distilled' ? 'Context ready' : ''))}</span>
           <span class="worker ${cls}" title="${label}"></span>
         </button>
@@ -215,18 +219,24 @@ function renderMain() {
     main.innerHTML = '<div class="empty">That idea is gone.</div>';
     return;
   }
+  if (S.route.tab === 'meeting' && S.route.file === 'new') {
+    main.innerHTML = renderIdeaHead() + renderSubhead() + meetingLayout(S.idea, startBody());
+    main.dataset.view = '';
+    $('#hunch').focus();
+    return;
+  }
   const prevIdea = main.dataset.view;
   const prevTab = main.dataset.tab;
   const { nearBottom, top } = keepFocus(() => {
     const view = { context: renderContext, prds: renderPrds }[S.route.tab] || renderMeeting;
     main.innerHTML = renderIdeaHead() + renderSubhead() + view();
-    main.dataset.view = S.idea.id;
+    main.dataset.view = `${S.idea.id}:${S.route.file || ''}`;
     main.dataset.tab = S.route.tab;
   });
-  const sameView = prevIdea === S.idea.id && prevTab === S.route.tab;
+  const sameView = prevIdea === `${S.idea.id}:${S.route.file || ''}` && prevTab === S.route.tab;
   if (S.route.tab === 'meeting') {
     decoratePanel(main);
-    const body = $('.body');
+    const body = $('.ctx-doc');
     if (!sameView || nearBottom) body.scrollTop = body.scrollHeight;
     else body.scrollTop = top;
     autosize($('#composer'));
@@ -251,23 +261,31 @@ function showChanges() {
 }
 
 function renderStart(main) {
+  const repo = S.workspaces.find((w) => w.id === S.ws)?.name || 'this repo';
+  main.innerHTML = `<header class="idea-head"><div class="ws-title">${BRAND}<span class="crumb-sep">/</span>${FOLDER_ICON}<span class="ws-name">${esc(repo)}</span><span class="worker-slot">${workerBadge()}</span></div></header>${startBody()}`;
+  $('#hunch').focus();
+}
+
+// The pitch box: the first meeting's hunch, or the change the next meeting proposes
+function startBody() {
   const draft = S.drafts.__new || '';
   const repo = S.workspaces.find((w) => w.id === S.ws)?.name || 'this repo';
-  main.innerHTML = `<header class="idea-head"><div class="ws-title">${BRAND}<span class="crumb-sep">/</span>${FOLDER_ICON}<span class="ws-name">${esc(repo)}</span><span class="worker-slot">${workerBadge()}</span></div></header>
-    <div class="body"><div class="start">
-    <h2>What's the hunch for ${esc(repo)}?</h2>
-    <p>Pitch it raw. The panel will push on the vision, the loop and the hard constraints, quickly. You make the call.</p>
-    <textarea class="field" id="hunch" data-keep="hunch" placeholder="e.g. A context workspace where humans vet ideas and agents build from the distilled mental model…">${esc(draft)}</textarea>
+  const next = S.idea ? `M${S.idea.meetings.length + 1}` : null;
+  return `<div class="body"><div class="start">
+    <h2>${next ? `${next}: what changes in ${esc(repo)}?` : `What's the hunch for ${esc(repo)}?`}</h2>
+    <p>${next ? 'Pitch the feature or the rethink. The panel works from the current context and the meetings log, and pushes on what this changes. You make the call: commit amends the context.' : 'Pitch it raw. The panel will push on the vision, the loop and the hard constraints, quickly. You make the call.'}</p>
+    <textarea class="field" id="hunch" data-keep="hunch" placeholder="${next ? 'e.g. Teams: several people share one workspace and its context…' : 'e.g. A context workspace where humans vet ideas and agents build from the distilled mental model…'}">${esc(draft)}</textarea>
     <div class="row">
       <div class="panelists">
         <span style="background:var(--ceo-soft);color:var(--ceo)">CEO</span>
         <span style="background:var(--pm-soft);color:var(--pm)">PM</span>
         <span style="background:var(--arch-soft);color:var(--arch)">Architect</span>
       </div>
-      <button class="btn primary" id="start">Start the meeting ⌘↵</button>
+      <div class="grow"></div>
+      ${next ? '<button class="btn ghost" data-tab="meeting">Cancel</button>' : ''}
+      <button class="btn primary" id="start">Start ${next || 'the meeting'} ⌘↵</button>
     </div>
   </div></div>`;
-  $('#hunch').focus();
 }
 
 // Per-file progress: approved, waiting for your review, being written, queued, not yet, or stale
@@ -280,22 +298,14 @@ function fileState(i, f) {
   return st; // done | review | working (rewriting an existing file)
 }
 
-// Header: the workspace and the next step
+// Header: the workspace, and the flow every change goes through (a legend, not a status)
+const FLOW = ['Meeting', 'Context', 'PRDs', 'Exec'];
 function renderIdeaHead() {
   const i = S.idea;
   const w = S.workspaces.find((x) => x.id === S.ws);
-  const killed = i.stage === 'killed';
-  const steps = killed ? ['Meeting', 'Killed'] : ['Meeting', 'Context', 'PRDs', 'Exec'];
-  const executing = Object.keys(i.executions || {}).length > 0;
-  const at = killed ? 1 : { meeting: 0, distilling: 1, distilled: executing ? 3 : i.prd ? 2 : 1 }[i.stage];
   return `<header class="idea-head">
     <div class="ws-title" title="${esc(w?.repo || '')}">${BRAND}<span class="crumb-sep">/</span>${FOLDER_ICON}<span class="ws-name">${esc(w?.name || '')}</span><span class="worker-slot">${workerBadge()}</span><span class="ws-path"><bdi>${esc(w?.path || w?.repo || '')}</bdi></span></div>
-    <div class="rail">${steps
-      .map((label, n) => {
-        const cls = killed && n === 1 ? 'dead' : n === at ? 'now' : n < at ? 'done' : '';
-        return `${n ? '<span class="sep"></span>' : ''}<span class="step ${cls}">${n < at && !killed ? '✓ ' : ''}${esc(label)}</span>`;
-      })
-      .join('')}</div>
+    <div class="rail" title="How work flows through Signals">${FLOW.map((label, n) => `${n ? '<span class="sep"></span>' : ''}<span class="step">${label}</span>`).join('')}</div>
   </header>`;
 }
 
@@ -303,19 +313,40 @@ function renderIdeaHead() {
 function renderSubhead() {
   const i = S.idea;
   const tab = S.route.tab;
-  const hasCtx = i.stage === 'distilling' || i.stage === 'distilled' || i.context.length;
-  const turns = i.messages.filter((m) => m.author === 'panel').length;
-  const meetingMeta = i.stage === 'killed' ? 'killed' : turns;
+  const hasCtx = i.stage === 'distilling' || i.stage === 'distilled' || i.context.length || i.log;
+  const meetingMeta = i.meetings.length > 1 ? i.meetings.length : cur(i).stage === 'killed' ? 'killed' : cur(i).messages.filter((m) => m.author === 'panel').length;
   const approved = CONTEXT_FILES.filter((f) => fileState(i, f) === 'done').length;
   const hasPrds = i.stage === 'distilled' || i.prds.length;
   return `<nav class="subhead">
     <div class="tabs">
-      <button class="tab ${tab === 'meeting' ? 'active' : ''}" data-tab="meeting">Meeting<span class="count">${meetingMeta}</span></button>
+      <button class="tab ${tab === 'meeting' ? 'active' : ''}" data-tab="meeting">${i.meetings.length > 1 ? 'Meetings' : 'Meeting'}<span class="count">${meetingMeta}</span></button>
       <button class="tab ${tab === 'context' ? 'active' : ''}" data-tab="context" ${hasCtx ? '' : 'disabled title="Commit the idea to distill its context"'}>Context<span class="count">${hasCtx ? `${approved}/${CONTEXT_FILES.length}` : 'after the call'}</span></button>
       <button class="tab ${tab === 'prds' ? 'active' : ''}" data-tab="prds" ${hasPrds ? '' : 'disabled title="Approve the context to plan PRDs"'}>PRDs<span class="count">${i.prds.length || (hasPrds ? 'plan' : 'after context')}</span></button>
     </div>
   </nav>`;
 }
+
+// The meetings on the left, like the context files: oldest first, older ones read only, the latest active.
+// New meeting starts the next one.
+function renderMeetingList(i) {
+  const at = S.route.file === 'new' ? null : viewedMeeting(i)?.id;
+  const ICON = {
+    open: i.working === 'panel' ? STATE_ICON.working : STATE_ICON.review,
+    committed: STATE_ICON.done,
+    killed: '<span class="st dead">✕</span>',
+  };
+  const rows = i.meetings
+    .map((m) => `<button class="ctx-file ${m.id === at ? 'active' : ''}" data-meeting="${esc(m.id)}" title="${esc(m.title)} · ${m.stage}">${ICON[m.stage]}<span class="prd-num">${esc(m.id)}</span><span class="prd-title">${esc(m.title)}</span></button>`)
+    .join('');
+  const canNew = cur(i).stage !== 'open' && i.stage !== 'distilling';
+  const why = cur(i).stage === 'open' ? `${cur(i).id} is still open: commit or kill it first` : 'Finish reviewing the context first';
+  return `${rows}<div class="ctx-sep"></div>
+    <button class="ctx-file new-prd ${S.route.file === 'new' ? 'active' : ''}" data-meeting="new" ${canNew ? 'title="Start the next meeting"' : `disabled title="${why}"`}><span class="st plus">+</span>New meeting</button>`;
+}
+// The meetings list beside a pane (a transcript and its dock, or the pitch box)
+const meetingLayout = (i, pane) =>
+  `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderMeetingList(i)}</div><div class="mtg-pane">${pane}</div></div></div>`;
+const viewedMeeting = (i) => i.meetings.find((m) => m.id === S.route.file) || cur(i);
 
 // ---------- Meeting ----------
 
@@ -328,22 +359,33 @@ function workerHint() {
 
 function renderMeeting() {
   const i = S.idea;
-  const panelBusy = i.working === 'panel';
-  const msgs = i.messages
-    .map((m) =>
-      m.author === 'you'
+  const mt = viewedMeeting(i);
+  const latest = mt === cur(i);
+  const panelBusy = latest && i.working === 'panel';
+  // A resume shows as a divider where it picked up, with the context files edited in between
+  const resumedAt = new Map((mt.resumes || []).map((r) => [r.from, r]));
+  const divider = (r) => `<div class="resumed"><span>Resumed ${esc(r.at.slice(0, 10))}${r.changed?.length ? ` · context changed since: ${esc(r.changed.join(', '))}` : ''}</span></div>`;
+  const msgs = mt.messages
+    .map((m, n) =>
+      (resumedAt.has(n) ? divider(resumedAt.get(n)) : '') +
+      (m.author === 'you'
         ? `<section class="turn turn-you"><span class="who">You</span><div class="said">${esc(m.text)}</div></section>`
-        : `<section class="turn turn-panel"><div class="msg-panel md">${md(m.text)}</div></section>`,
+        : `<section class="turn turn-panel"><div class="msg-panel md">${md(m.text)}</div></section>`),
     )
-    .join('');
+    .join('') + (resumedAt.has(mt.messages.length) ? divider(resumedAt.get(mt.messages.length)) : '');
   const pending = (text) => `<section class="turn turn-wait"><span class="who">Panel</span><div class="said"><span class="wait-bar"></span>${text}</div></section>`;
   let tail = '';
   if (panelBusy) tail = pending('Deliberating');
-  else if (i.waiting_on === 'claude' && i.stage === 'meeting') tail = workerHint() || pending('Waiting for the panel');
+  else if (latest && i.waiting_on === 'claude' && mt.stage === 'open' && mt.messages.at(-1)?.author === 'you') tail = workerHint() || pending('Waiting for the panel');
 
   let dock = '';
-  if (i.stage === 'meeting') {
-    const turns = i.messages.filter((m) => m.author === 'panel').length;
+  const why = mt.verdict?.note ? `<span class="note">— ${esc(mt.verdict.note)}</span>` : '';
+  if (!latest) {
+    dock = `<div class="dock"><div class="dock-inner"><div class="banner ${mt.stage}">
+      <span class="grow"><b>${esc(mt.id)} · ${mt.stage === 'killed' ? 'Killed' : 'Committed'}</b> ${why}<br><small>An earlier meeting, read only. Only the latest one can be resumed; to revisit this, start a new meeting and say so.</small></span>
+      <button class="btn sm" data-meeting="${esc(cur(i).id)}">Go to ${esc(cur(i).id)} →</button></div></div></div>`;
+  } else if (mt.stage === 'open') {
+    const turns = mt.messages.filter((m) => m.author === 'panel').length;
     dock = `<div class="dock"><div class="dock-inner">
       ${S.verdictOpen ? renderVerdict() : ''}
       <div class="composer">
@@ -355,26 +397,25 @@ function renderMeeting() {
         ${S.verdictOpen ? '' : `<button class="btn ${turns >= 2 ? 'primary' : ''} sm" id="open-verdict" ${panelBusy || !turns ? 'disabled' : ''}>Make the call</button>`}
       </div>
     </div></div>`;
-  } else if (i.stage === 'killed') {
-    dock = `<div class="dock"><div class="dock-inner"><div class="banner killed">
-      <span class="grow"><b>Killed</b> ${i.verdict?.note ? `<span class="note">— ${esc(i.verdict.note)}</span>` : ''}<br><small>Time and tokens saved. It stays here with your reasoning; delete it to start another idea in this repo.</small></span>
-      <button class="btn sm" id="reopen">Reopen meeting</button>
-      <button class="btn ghost sm" id="delete-idea" title="Delete this idea so the repo can take a new one">Delete idea</button></div></div></div>`;
   } else {
-    dock = `<div class="dock"><div class="dock-inner"><div class="banner committed">
-      <span class="grow"><b>Committed</b> ${i.verdict?.note ? `<span class="note">— ${esc(i.verdict.note)}</span>` : ''}
-        <br><small>Thinking moved on? Reopen the meeting: what you change flows into the context as edits.</small></span>
-      <button class="btn sm" id="reopen" ${i.working ? 'disabled' : ''}>Reopen meeting</button>
-      <button class="btn sm good" data-tab="${i.prd ? 'prds' : 'context'}">${i.prd ? 'Go to PRDs →' : 'Go to context →'}</button></div></div></div>`;
+    const busy = i.working || i.stage === 'distilling';
+    const off = busy ? `disabled title="${i.stage === 'distilling' ? 'Finish reviewing the context first' : 'Wait for the worker'}"` : '';
+    const killed = mt.stage === 'killed';
+    dock = `<div class="dock"><div class="dock-inner"><div class="banner ${mt.stage}">
+      <span class="grow"><b>${esc(mt.id)} · ${killed ? 'Killed' : 'Committed'}</b> ${why}
+        <br><small>${killed ? 'Logged with your reasoning. Resume it for a second hearing, or start the next meeting.' : 'Same feature, thinking moved on? Resume it: the new turns amend the context. A different change? Start a new meeting.'}</small></span>
+      <button class="btn sm" id="resume" ${off}>Resume ${esc(mt.id)}</button>
+      <button class="btn sm" data-meeting="new" ${off}>New meeting</button>
+      ${killed ? '' : `<button class="btn sm good" data-tab="${i.prd ? 'prds' : 'context'}">${i.prd ? 'Go to PRDs →' : 'Go to context →'}</button>`}</div></div></div>`;
   }
-  return `<div class="body"><div class="transcript">${msgs}${tail}</div></div>${dock}`;
+  return meetingLayout(i, `<div class="ctx-doc"><div class="transcript">${msgs}${tail}</div></div>${dock}`);
 }
 
 function renderVerdict() {
   const c = S.verdictChoice;
   return `<div class="verdict">
     <h3>Your call</h3>
-    <p class="hint">The panel advises. You decide. Commit distills the meeting into context files${S.idea.context.length ? ', updating the current ones with what changed' : ''}. Kill keeps it here with your reasoning.</p>
+    <p class="hint">The panel advises. You decide. Commit ${S.idea.context.length ? 'amends the context with what this meeting changed' : 'distills the meeting into context files'}, and logs the call once you approve it. Kill logs it with your reasoning.</p>
     <div class="choices">
       <button class="choice commit ${c === 'commit' ? 'sel' : ''}" data-choice="commit"><b>Commit</b><span>The shape is right. Distill the mental model.</span></button>
       <button class="choice kill ${c === 'kill' ? 'sel' : ''}" data-choice="kill"><b>Kill</b><span>Not worth building. Keep the why.</span></button>
@@ -477,10 +518,15 @@ function renderGate(i) {
   if (state === 'review') {
     const next = STEPS[n + 1];
     const pend = i.refinements.some((r) => r.status === 'pending');
+    const m = i.meetings.find((x) => x.id === i.distill.meeting) || cur(i);
+    const all = (k) => STEPS.flatMap((x) => i.distill.log?.[x.id]?.[k] || []);
+    const part = (title, lines) => (lines.length ? `<p class="gate-log-h">${title}</p><ul>${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '');
+    const logLine = next ? '' : `<div class="gate-log"><p>Approving logs the call: <b>${esc(m.id)}${m.resumes?.length ? ' (resumed)' : ''} · ${esc(m.title)} · ${i.distill.revised ? 'context redone' : 'committed'}</b>${m.verdict?.note ? ` — ${esc(m.verdict.note)}` : ''}</p>${part('Decided', all('decided'))}${part('Ruled out', all('ruled_out'))}${part('Context', all('context'))}</div>`;
     return `<div class="gate review">
       <div class="gate-top"><b>${esc(step.what)} are ready for your review</b></div>
       <p>${esc(step.gate)}</p>
       ${i.distill.note ? `<div class="gate-note md">${DOMPurify.sanitize(marked.parse(i.distill.note, { gfm: true, breaks: true }))}</div>` : ''}
+      ${logLine}
       <div class="gate-row">
         <span class="gate-hint">Select any text to ask for a change.</span>
         <button class="btn ghost sm" id="redo-step">Redo…</button>
@@ -500,13 +546,14 @@ function renderGate(i) {
 function openFile(i) {
   const have = new Set(i.context.map((f) => f.name));
   if (S.route.file && have.has(S.route.file)) return S.route.file;
+  if (S.route.file === LOG && i.log) return LOG;
   const current = STEPS[stepIndex(i.distill?.step)];
   if (i.stage === 'distilling' && current) {
     const mine = current.files.filter((f) => have.has(f));
     const f = i.working === 'distill' ? mine.at(-1) : mine[0];
     if (f) return f;
   }
-  return CONTEXT_FILES.find((n) => have.has(n)) || i.context[0]?.name || null;
+  return CONTEXT_FILES.find((n) => have.has(n)) || i.context[0]?.name || (i.log ? LOG : null);
 }
 
 // The context files on the left of the document, with their progress. Files are written in order, so
@@ -528,7 +575,9 @@ function renderFileList(i, open) {
     return `<button class="ctx-file ${f === open ? 'active' : ''}" ${has(f) ? `data-file="${esc(f)}"` : 'disabled'}>${icon}${esc(FILE_LABEL[f] || f)}${right}</button>`;
   };
   const live = (step) => (i.working === 'distill' && stepState(i, step.id) === 'working' ? writing(step) : null);
-  return STEPS.map((step) => step.files.map((f) => row(f, live(step))).join('')).join('<div class="ctx-sep" title="Your approval"></div>');
+  const files = STEPS.map((step) => step.files.map((f) => row(f, live(step))).join('')).join('<div class="ctx-sep" title="Your approval"></div>');
+  const log = i.log ? `<div class="ctx-sep"></div><button class="ctx-file ${open === LOG ? 'active' : ''}" data-file="${LOG}" title="Every call on this repo. The panel reads it with the context."><span class="st log">≡</span>Meetings log</button>` : '';
+  return files + log;
 }
 
 function renderContext() {
@@ -537,7 +586,9 @@ function renderContext() {
   const file = openFile(i);
   const gate = renderGate(i);
   let doc;
-  if (!file) {
+  if (file === LOG) {
+    doc = `<div class="ctx-doc-inner">${gate}<article class="md" id="doc" data-file="${LOG}">${md(i.log)}</article></div>`;
+  } else if (!file) {
     doc = i.stage === 'distilled'
       ? `<div class="ctx-doc-inner"><div class="distill-wait"><h2>No current context</h2><p>The context folder is empty. Distill it again from the meeting.</p>${canRedistill(i) ? '<button class="btn primary" id="redistill">Distill from the meeting</button>' : ''}</div></div>`
       : `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>The brief appears here first: product and business, the must-read. You review each step before the next one starts.</p></div></div>`;
@@ -550,7 +601,12 @@ function renderContext() {
       ...pending.map((r) => `<div class="note-line"><span class="dot busy"></span>${i.working === 'refine' ? 'Changing' : 'Queued'} · <span class="q">${quote(r)}</span></div>`),
       ...asked.map((r) => `<div class="note-line ask"><b>The worker asks:</b> ${esc(r.reply)}<span class="q">on “${quote(r)}”</span><button class="btn ghost sm" data-dismiss="${esc(r.id)}" title="Dismiss">×</button></div>`),
     ].join('');
-    const next = i.stage === 'distilled' && !i.prd ? `<div class="note-line next-line">Context approved. Next: cut the work into PRDs for your executor.<button class="btn primary sm" data-tab="prds">Plan PRDs →</button></div>` : '';
+    // The latest committed meeting has no PRDs yet: its work is next
+    const lc = [...i.meetings].reverse().find((m) => m.stage === 'committed');
+    const hasOwn = lc && Object.values(i.prd_origin || {}).includes(lc.id);
+    const next = i.stage === 'distilled' && lc && !hasOwn && (!i.prd || (i.prd.status === 'done' && i.prd_stale))
+      ? `<div class="note-line next-line">Context approved. Next: cut ${i.prd ? `${esc(lc.id)}'s change` : 'the work'} into PRDs for your executor.<button class="btn primary sm" data-tab="prds">${i.prd ? 'Add its PRDs →' : 'Plan PRDs →'}</button></div>`
+      : '';
     doc = `<div class="ctx-doc-inner">
       ${gate}${next}
       <div class="ctx-tools">${canRefine(i) ? '<button class="btn sm" id="ask-file">Ask for a change</button>' : ''}</div>
@@ -661,6 +717,17 @@ function renderPrdList(i, open) {
     const right = pend ? `<span class="pend">${pend} pending</span>` : fresh ? '<span class="pend">new</span>' : i.changes?.[f.name] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
     return `<button class="ctx-file ${f.name === open ? 'active' : ''}" data-prd="${esc(f.name.slice(5))}" title="${esc(f.name)}">${icon}${num ? `<span class="prd-num">${esc(num)}</span>` : ''}<span class="prd-title">${esc(title)}</span>${right}</button>`;
   });
+  // Grouped by the meeting each PRD builds, once there is more than one
+  const origin = (f) => i.prd_origin?.[f.name] || '';
+  if (new Set(i.prds.map(origin)).size > 1) {
+    for (let n = i.prds.length - 1; n >= 0; n--) {
+      const o = origin(i.prds[n]);
+      if (n === 0 || origin(i.prds[n - 1]) !== o) {
+        const m = i.meetings.find((x) => x.id === o);
+        rows.splice(n, 0, `<div class="prd-group" title="${esc(m?.title || '')}">${esc(o || 'Earlier')}${m ? ` · ${esc(m.title)}` : ''}</div>`);
+      }
+    }
+  }
   if (writing) rows.push(`<button class="ctx-file" disabled>${STATE_ICON.working}${updating ? 'Updating…' : 'Writing…'}</button>`);
   if (!rows.length) return '<div class="ctx-empty">No PRDs yet</div>';
   const off = canChangePrds(i) ? '' : `disabled title="${p.status === 'review' ? 'Approve the PRDs under review first' : 'Wait for the worker'}"`;
@@ -710,7 +777,9 @@ function renderPrdGate(i) {
     </div>`;
   }
   if (i.prd_stale) {
-    return `<div class="note-line chg-line"><span class="chg-dot"></span>The context changed since these PRDs were written.
+    const lc = [...i.meetings].reverse().find((m) => m.stage === 'committed');
+    const fresh = lc && !Object.values(i.prd_origin || {}).includes(lc.id);
+    return `<div class="note-line chg-line"><span class="chg-dot"></span>${fresh ? `${esc(lc.id)} amended the context since these PRDs were written. Update them to add its work.` : 'The context changed since these PRDs were written.'}
       <button class="btn sm" id="update-prds" ${i.working || prdsPending(i) ? 'disabled' : ''}>Update the PRDs</button></div>`;
   }
   return '';
@@ -971,6 +1040,7 @@ document.addEventListener('click', async (e) => {
       return goIndex();
     }
     if (t.dataset.tab && !t.disabled) return go({ tab: t.dataset.tab, file: null });
+    if (t.dataset.meeting && !t.disabled) return go({ tab: 'meeting', file: t.dataset.meeting === cur(S.idea).id ? null : t.dataset.meeting });
     if (t.dataset.file) return go({ tab: 'context', file: t.dataset.file });
     if (t.dataset.prd) return go({ tab: 'prds', file: t.dataset.prd });
     if (t.dataset.compose) return go({ tab: 'prds', file: 'change' });
@@ -1049,11 +1119,13 @@ document.addEventListener('click', async (e) => {
         return renderMain();
       case 'submit-verdict':
         return submitVerdict();
-      case 'reopen':
-        if (S.idea.stage !== 'killed' && !confirm('Reopen the meeting?\nThe current context stays as it is until you commit again, which updates the context with what the new turns changed.')) return;
-        await wsApi('POST', '/api/ideas/reopen', { id: S.idea.id });
+      case 'resume': {
+        const m = cur(S.idea);
+        if (m.stage === 'committed' && !confirm(`Resume ${m.id}?\nThe context stays as it is until you commit again, which amends it with the new turns.`)) return;
+        await wsApi('POST', '/api/ideas/resume', { id: S.idea.id });
         await refreshIdea();
-        return go({ tab: 'meeting' });
+        return go({ tab: 'meeting', file: null });
+      }
       case 'redistill': {
         // Only offered when a distilled idea's context folder is empty: write it again from the meeting
         await wsApi('POST', '/api/ideas/redo', { id: S.idea.id, step: 'brief' });

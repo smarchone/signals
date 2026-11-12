@@ -23,7 +23,8 @@ files and never contradict them. If `guidance` is set, follow it.
 
 ## Content
 
-- **Derived, not invented.** Everything traces to the meeting and the approved files. Fill a gap only where
+- **Derived, not invented.** Everything traces to the meetings (the current context holds the earlier ones)
+  and the approved files. Fill a gap only where
   a wrong guess would be costly to undo, and mark that default `(assumed)` where it applies; leave other gaps
   to the implementer's judgement.
 - **Curate, don't enumerate.** Include what the reviewer or the coding agent would get wrong or have to guess

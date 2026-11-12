@@ -1,89 +1,78 @@
 # Signals
 
-**The human operating plane for building with coding agents.** Iterate on an idea at the product and business
-level, make the go / no-go call yourself, and distill it into just enough context to drive the project.
+**A control plane for human decisions, not agent orchestration.**
 
-- **Review friendly:** every screen and file is shaped to save your attention.
-- **Just enough abstractions** for you to hold in mind and steer by.
-- **Good enough signals for agents:** a direction, not instructions. Coding agents are capable LLMs; they
-  make local decisions, and you review those at PR time.
+Coding agents write code fast, but they build whatever half-formed idea you hand them. Signals is a local
+daemon that runs the step before the code, from ideation to context, PRDs and execution:
 
-Vibe coding starts from an unvetted hunch and a mental model that lives only in your head, so you end up in
-prompt fights. Traditional SDLC fixes that with process and micromanagement. Signals sits in between: you work
-at the context layer (the *why* and the *shape*), and agents work at the code layer.
+- **Meetings:** brainstorm with a founding panel (CEO, PM, Architect) that pressure-tests the idea. **You** make
+  the go / no-go call, so only vetted ideas get built.
+- **Context layer:** the meeting is distilled into a few short files (business, product, model, vocab,
+  architecture) that give your agents a direction, not instructions.
+- **PRDs to code:** the context is cut into PRDs in build order. Curate them, then execute one PRD per PR
+  with Claude Code or your own agent.
+- **Attention-friendly UX:** every stage stops for your approval, files are short, and changes stay highlighted
+  until you mark them reviewed.
+
+You steer at the *why* and the *shape*; agents make the local decisions, and you review them at PR time.
 
 ```
-  meeting ──▶ verdict ──▶ distill, high level first ─────────▶ PRDs ─────────────▶ hand off
-  panel:      you:        business.md · product.md · model.md   01-skeleton.md      (bring your own
-  CEO·PM·     commit      ─ ─ ─ ─ ─ ─ you approve ─ ─ ─ ─ ─ ─   02-….md             executor), one
-  Architect   or kill     vocab.md · architecture.md            ◀ you approve       PRD per PR
-                                                   ◀ you approve
+ meeting ──▶ verdict ──▶ context ─────────────────────▶ PRDs ──────────▶ build
+ CEO·PM·     you commit  business · product · model     3–7 PRs, in      one PRD per PR,
+ Architect   or kill     vocab · architecture           build order      Claude Code or your agent
+                         ◀ you approve                  ◀ you approve
 ```
+
+## Start in 1 minute
+
+Needs Node 22+ and [Claude Code](https://claude.com/claude-code).
+
+From a checkout of this repo:
+
+```bash
+npm link                         # install the signals CLI
+npx skills add . -g              # install the /signals skill globally
+signals serve /path/to/repo      # start the daemon, register your repo
+```
+
+1. Open Claude Code in your repo and run `/signals` (this starts the worker).
+2. Open **http://127.0.0.1:3461** and pitch your idea to the panel.
+3. Commit or kill it. If you commit, review the context, then the PRDs.
+4. Click **Execute** on a PRD (or **Copy prompt** for your own agent). Test, commit, **Mark complete**, next.
+5. Next feature? Start a **new meeting**. The panel works from the context and the meetings log, and
+   committing amends the context. Same feature, thinking moved on? **Resume** the latest meeting instead.
+
+## Meetings
+
+A repo has one living context and a series of meetings (M1, M2, …). M1 sets the context up; each later one
+proposes a change to it, like a PR for the mental model. The panel reads only the context, the meetings log
+(`.signals/meetings.md`) and the meeting it is in: never older transcripts, and a PRD only when you name one.
+Every call is logged: a kill at once, with your reason, and a commit when you approve its context. One meeting
+is active at a time, and only the latest can be resumed; older ones are read only. PRDs are grouped by the
+meeting whose change they build.
 
 ## How it works
 
 ```
- ┌──────────────┐           ┌───────────────────────────┐   jobs    ┌──────────────────────┐
- │   Browser    │ ────────▶ │  Daemon (signals serve)   │ ────────▶ │  Worker, per repo    │
- │  meetings,   │ ◀──────── │  localhost:3461           │ ◀──────── │  /signals skill +    │
- │  verdicts,   │   live    │  repo-a/.signals          │  replies  │  poll.sh (Claude     │
- │  context     │           │  repo-b/.signals          │           │  Code)               │
- └──────────────┘           └───────────────────────────┘           └──────────────────────┘
+ Browser  ◀──▶  Daemon (localhost:3461)  ◀── jobs / replies ──▶  Worker per repo (/signals in Claude Code)
 ```
 
-Jobs are derived from each idea's state, one at a time per repo:
-
-| Job | When | The worker… |
-|-----|------|-------------|
-| `panel` | you spoke last in a meeting | answers as CEO, PM and Architect, ending on the sharpest question |
-| `distill` | on commit, or when you approve business, product and model | writes the next files while you watch, then waits for your approval |
-| `prd` | you ask for PRDs once the context is approved, or to update them | cuts the context into PRDs in build order, then waits for your approval |
-| `refine` | you asked for a change on a context file or PRD (or a selection in it) | edits the file, and the others if the change ripples |
-
-At each approval you **approve**, **ask for a change** on any selection, or **redo** with guidance.
-The files are curated signals, not documentation: `model.md` is the product as composed abstractions, high
-level only; `vocab.md` pins 10–15 terms by domain, each domain explained in its own terms; `architecture.md`
-explains how those domains compose into the product, then shows it as a hexagonal sketch with its ports and
-adapters: an initial direction rather than a decision log.
-
-**PRDs** are the plan layer and the unit of work: the context cut into three to seven PRs' worth, in build
-order, starting with a walking skeleton of the whole loop. Each holds the outcome, scope, constraints,
-decisions and acceptance checks for one PR, and points to the context rather than restating it. Once you
-approve them, **Execute** builds one in a background Claude Code session (`claude --bg`) right on your checkout,
-one PRD at a time: you test it, steer it with `claude attach <id>`, commit, and **Mark complete** to free the
-next: the executor's final reply is appended to the PRD as its **Execution summary** (it covers the session's
-work: note anything you changed yourself in the PRD). Or **Copy prompt** for your own coding agent. Either way the PRD is marked handed off; later updates
-leave handed-off PRDs alone and add follow-ups instead. To add a PRD or reshape the set, say so in plain words
-under **Add or change PRDs**; you re-review only what moved. If the context changes, the PRDs are flagged for an
-update.
-
-A repo has one idea, in `<repo>/.signals/`: `idea.json` (transcript, verdict, change requests, handoffs),
-`context/*.md` and `prds/*.md`. To change distilled context, reopen the meeting (the new turns flow
-into the files as edits) or ask for a change on any file; either way only what moved is edited, and highlighted
-until you mark it reviewed. To vet a different idea, delete the current one. Commit `.signals/` with your repo; it is the shared
-mental model.
-
-## Run it
+The daemon derives one job at a time per repo from the idea's state: **panel** (you spoke last), **distill**
+(you committed or approved), **prd** (you asked for PRDs), **refine** (you asked for a change). **Execute** runs
+the PRD in a background Claude Code session on your checkout (`claude --bg`; steer it with `claude attach <id>`),
+and its final reply is saved to the PRD as an **Execution summary**.
 
 ```bash
-node bin/signals.js serve /path/to/repo     # starts the daemon, registers the repo, prints the URL
-ln -s "$PWD/.claude/skills/signals" ~/.claude/skills/signals   # make /signals available in every repo
-```
-
-Then open Claude Code in that repo and run `/signals`. Open http://127.0.0.1:3461 and start a meeting.
-
-```bash
-signals status          # registered repos and whether a worker is listening
-signals remove [repo]   # unregister (the .signals/ folder stays); or use × on the repo in the sidebar
-signals restart         # pick up a new server.js; repos and listening workers come back on their own
+signals status          # registered repos, and whether a worker is listening
+signals remove [repo]   # unregister (.signals/ stays)
+signals restart         # reload server.js; repos and workers reconnect
 signals stop            # stop the daemon
 ```
 
-The opinions live in the skill: `references/panel.md` (how the panel speaks) and `references/distill/`
-(`common.md` for every file; `brief.md` covers business, product and model, and `design.md` vocabulary and
-architecture), and `references/prd.md` (the plan layer). Change those to change the house style.
+**Make it yours:** the house style lives in the skill. Edit `references/panel.md` (how the panel talks),
+`references/distill/` (how context is written) and `references/prd.md` (how work is cut).
 
 ## Not yet
 
-Driving an executor directly (GitHub issues, an abstractor/implementor split) and watching the PRs that come
-back, replying to the worker's questions in place, and drift detection.
+Driving executors directly (GitHub issues, PR watching), answering the worker's questions in place, and drift
+detection.

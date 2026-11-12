@@ -441,3 +441,19 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .note-line.exec .exec-btns { display: flex; gap: 6px; margin-left: auto; flex: none; }
 .note-line.exec .exec-btns .btn { margin-left: 0; padding: 0 10px; }
 @media (max-width: 640px) { .note-line.exec { flex-wrap: wrap; } }
+
+/* Meetings: the picker in the subhead, the resume divider, the log */
+.mtg-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.mtg-pane > .ctx-doc, .mtg-pane > .body { flex: 1; }
+.ctx-file .st.dead { border-color: var(--bad); color: var(--bad); font-size: 9px; font-weight: 700; }
+.resumed { display: flex; align-items: center; gap: 12px; margin: 8px 0 20px; color: var(--ink-3); font-size: 12.5px; }
+.resumed::before, .resumed::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.gate-log { font-size: 13px; color: var(--ink-2); }
+.ctx-file .st.log { border-style: solid; font-size: 10px; color: var(--ink-3); }
+.prd-group { padding: 10px 10px 4px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prd-group:first-child { padding-top: 2px; }
+.start .row .grow { flex: 1; }
+.gate-log p { margin: 0; }
+.gate-log ul { margin: 6px 0 0; padding-left: 18px; }
+.gate-log li { margin: 2px 0; }
+.gate-log .gate-log-h { margin: 8px 0 0; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }

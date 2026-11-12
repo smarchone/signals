@@ -1,8 +1,14 @@
 // Signals daemon: the human operating plane for many repos.
-// Each registered repo is a workspace with at most one idea, in <repo>/.signals/:
-//   idea.json   the meeting transcript, the go/no-go verdict, the stage, change requests
-//   context/    the distilled context files (business, product, model, vocab, architecture)
-//   prds/       the plan layer: PRDs (01-<slug>.md, …), units of work to hand to an executor
+// Each registered repo is a workspace with one living context, in <repo>/.signals/:
+//   idea.json    the meetings (transcripts, go/no-go verdicts), the distill state, change requests, executions
+//   meetings.md  the meetings log: one entry per call (committed or killed), added to, never rewritten
+//   context/     the distilled context files (business, product, model, vocab, architecture)
+//   prds/        the plan layer: PRDs (01-<slug>.md, …), units of work to hand to an executor
+//
+// Meetings: M1 sets up the context; each later meeting proposes a change to it. One is active at a time: you
+// resume the latest one, or start the next. The panel reads only the context and the meetings log (plus the
+// meeting it is in), never older transcripts; a PRD only when you pull one in. Committing a meeting amends the
+// context, through the same reviewed stages, and adds its log entry when you approve the last one.
 //
 // Distilling is staged, high level first, with your review gate after each step:
 //   brief (product + business + model) -> design (vocab + architecture)
@@ -116,11 +122,82 @@ function makeWorkspace(id, repo) {
   fs.mkdirSync(ROOT, { recursive: true });
   const broadcast = (event, data) => broadcastAll(event, { ...data, workspace: id });
 
-  // ---------- The repo's one idea, cached in memory ----------
+  // ---------- The repo's project (meetings, distill state, PRD bookkeeping), cached in memory ----------
   // `ideas` holds at most one entry; it stays a map so routes and jobs keep addressing the idea by id.
 
   const ideas = new Map(); // id -> idea
   const contextDir = () => path.join(ROOT, 'context');
+  const LOG_FILE = path.join(ROOT, 'meetings.md');
+  const LOG_HEAD = '# Meetings log\n\n> Every go / no-go call on this repo, oldest first. The context holds what stands; this is how it got there.\n';
+
+  // ---------- Meetings ----------
+  const cur = (idea) => idea.meetings.at(-1); // the active meeting: the only one you can talk in or resume
+  const meetingOf = (idea, mid) => idea.meetings.find((m) => m.id === mid) || cur(idea);
+  const lastCommitted = (idea) => [...idea.meetings].reverse().find((m) => m.stage === 'committed') || null;
+  // The pipeline stage, derived: a distill in progress, else distilled context, else where the meeting stands
+  function syncStage(idea) {
+    const busy = idea.distill && idea.distill.status !== 'done';
+    idea.stage = busy ? 'distilling' : idea.distilled ? 'distilled' : cur(idea).stage === 'killed' ? 'killed' : 'meeting';
+  }
+  const sha = (s) => createHash('sha1').update(s).digest('hex').slice(0, 12);
+  const fileHashes = () => Object.fromEntries(contextNow().map((f) => [f.name, sha(f.content)]));
+  const changedBetween = (before = {}, after = {}) => CONTEXT_FILES.filter((f) => before[f] !== after[f]);
+
+  // One log entry per call. A call after a resume says so; the earlier entry stays as it was.
+  // log: { decided, ruled_out, context } in the worker's words; null for a kill (its why is the entry)
+  function appendLog(m, decision, log, at = now()) {
+    let entry = `## ${m.id}${m.resumes?.length ? ' (resumed)' : ''} · ${m.title} · ${decision} ${at.slice(0, 10)}\n`;
+    if (m.verdict?.note) entry += `\nWhy: ${m.verdict.note}\n`;
+    const section = (title, lines) => (lines?.length ? `\n**${title}**\n\n${lines.map((l) => `- ${l}`).join('\n')}\n` : '');
+    if (log) {
+      entry += section('Decided', log.decided) + section('Ruled out', log.ruled_out);
+      entry += section('Context', log.context.length ? log.context : ['No change.']);
+    }
+    const head = fs.existsSync(LOG_FILE) ? '' : LOG_HEAD;
+    fs.appendFileSync(LOG_FILE, `${head}\n${entry}`);
+  }
+  // The distill's log, gathered across stages in order. A changed file the worker said nothing about still gets a line.
+  function logEntry(idea, changed) {
+    const all = (k) => DISTILL_STEPS.flatMap((x) => idea.distill.log?.[x.id]?.[k] || []);
+    const context = all('context');
+    const missed = changed.filter((f) => !context.some((l) => l.startsWith(f)));
+    return { decided: all('decided'), ruled_out: all('ruled_out'), context: [...context, ...missed.map((f) => `${f}: edited (no summary)`)] };
+  }
+  // The worker's log for one stage: { decided, ruled_out, context }, or a bare array of context lines
+  const stageLog = (v) => {
+    const o = Array.isArray(v) || typeof v === 'string' ? { context: v } : v || {};
+    return { decided: logLines(o.decided), ruled_out: logLines(o.ruled_out), context: logLines(o.context) };
+  };
+  // Lines: an array, or one per line; bullets stripped
+  const logLines = (v) =>
+    (Array.isArray(v) ? v : String(v || '').split('\n'))
+      .map((l) => String(l).replace(/^\s*[-*•]\s*/, '').trim())
+      .filter(Boolean)
+      .slice(0, 8);
+
+  // Earlier layout: one meeting at the top level of idea.json. It becomes M1.
+  function migrateMeetings(idea) {
+    if (idea.meetings) return;
+    const stage = { meeting: 'open', killed: 'killed' }[idea.stage] || 'committed';
+    idea.meetings = [{ id: 'M1', title: idea.title, stage, created_at: idea.created_at, messages: idea.messages || [], verdict: idea.verdict || null, distill_basis: idea.distill_basis ?? null, resumes: [] }];
+    if (idea.stage === 'distilled' && !idea.distilled) idea.distilled = { at: idea.updated_at };
+    if (idea.distill) idea.distill.meeting = 'M1';
+    if (idea.prd) idea.prd.meeting = 'M1';
+    idea.prd_origin = Object.fromEntries(prdNames().map((n) => [n, 'M1']));
+    if (idea.distilled) idea.context_basis = fileHashes();
+    delete idea.messages;
+    delete idea.verdict;
+    delete idea.distill_basis;
+    const m = idea.meetings[0];
+    if (fs.existsSync(LOG_FILE)) return;
+    // Backfill the log with M1's call. An open M1 with distilled context was committed, then reopened: log the
+    // commit, and mark where it resumed.
+    if (stage === 'killed') appendLog(m, 'killed', null, m.verdict?.at || idea.updated_at);
+    else if (idea.distilled) {
+      appendLog({ ...m, resumes: [] }, 'committed', { context: ['Set up the context: business, product, model, vocab and architecture.'] }, idea.distilled.at);
+      if (stage === 'open') m.resumes.push({ at: idea.updated_at, from: m.distill_basis ?? m.messages.length, changed: [] });
+    }
+  }
 
   // Earlier layout: .signals/ideas/<id>/{idea.json,context/}. Move the most recent idea up, once.
   function migrateLegacy() {
@@ -147,11 +224,16 @@ function makeWorkspace(id, repo) {
         idea.distill.step = LEGACY_STEP[idea.distill.step];
         idea.distill.approved = [...new Set((idea.distill.approved || []).map((x) => LEGACY_STEP[x] || x))].filter((x) => x !== idea.distill.step);
       }
+      const legacy = !idea.meetings;
+      migrateMeetings(idea);
+      syncStage(idea);
+      if (legacy) fs.writeFileSync(IDEA_FILE, JSON.stringify(idea, null, 2)); // keep the migration with the log it backfilled
       ideas.set(idea.id, idea);
     } catch {}
   }
 
   async function save(idea) {
+    syncStage(idea);
     idea.updated_at = now();
     await writeFile(IDEA_FILE, JSON.stringify(idea, null, 2));
     broadcast('idea_changed', { idea: idea.id });
@@ -209,13 +291,15 @@ function makeWorkspace(id, repo) {
       id: idea.id,
       title: idea.title,
       stage: idea.stage,
-      verdict: idea.verdict,
+      meeting: { id: cur(idea).id, title: cur(idea).title, stage: cur(idea).stage },
+      meeting_count: idea.meetings.length,
+      verdict: cur(idea).verdict,
       created_at: idea.created_at,
       updated_at: idea.updated_at,
-      message_count: idea.messages.length,
+      message_count: cur(idea).messages.length,
       distill: idea.distill || null,
       prd: idea.prd || null,
-      waiting_on: pending ? 'claude' : idea.stage === 'meeting' || reviewing(idea) || reviewingPrds(idea) ? 'you' : null,
+      waiting_on: pending ? 'claude' : cur(idea).stage === 'open' || reviewing(idea) || reviewingPrds(idea) ? 'you' : null,
       working: job?.idea === idea.id ? job.type : null,
     };
   }
@@ -241,7 +325,8 @@ function makeWorkspace(id, repo) {
 
   // What an idea is waiting on Claude for, if anything (and since when)
   function needs(idea) {
-    if (idea.stage === 'meeting' && idea.messages.at(-1)?.author === 'you') return { type: 'panel', at: idea.messages.at(-1).at };
+    const m = cur(idea);
+    if (m.stage === 'open' && m.messages.at(-1)?.author === 'you') return { type: 'panel', at: m.messages.at(-1).at };
     if (idea.stage === 'distilling' && idea.distill?.status === 'queued') return { type: 'distill', at: idea.distill.at };
     if (idea.stage === 'distilled' && idea.prd?.status === 'queued') return { type: 'prd', at: idea.prd.at };
     {
@@ -305,15 +390,34 @@ function makeWorkspace(id, repo) {
     for (const f of files) reviewed.delete(f);
   }
 
-  function transcript(idea) {
-    return idea.messages.map((m) => ({ author: m.author === 'you' ? 'user' : 'panel', text: m.text }));
+  function transcript(m) {
+    return m.messages.map((m) => ({ author: m.author === 'you' ? 'user' : 'panel', text: m.text }));
   }
 
   function jobView(j) {
     const idea = getIdea(j.idea);
     const base = { id: j.id, type: j.type, idea: { id: idea.id, title: idea.title } };
-    if (j.type === 'panel') return { job: { ...base, transcript: transcript(idea) } };
+    const present = () => CONTEXT_FILES.filter((f) => fs.existsSync(contextFile(idea.id, f)));
+    const log = fs.existsSync(LOG_FILE) ? LOG_FILE : null;
+    if (j.type === 'panel') {
+      // The panel works from the context and the meetings log, plus this meeting; never older transcripts
+      const m = cur(idea);
+      const context = present();
+      return {
+        job: {
+          ...base,
+          meeting: { id: m.id, title: m.title, resumed: m.resumes?.at(-1) || null },
+          context_dir: contextDir(),
+          context,
+          context_version: context.length ? contextHash(contextNow()) : null,
+          meetings_log: log,
+          prds_dir: prdDir(),
+          transcript: transcript(m),
+        },
+      };
+    }
     if (j.type === 'distill') {
+      const m = meetingOf(idea, idea.distill.meeting);
       const step = stepOf(idea.distill.step);
       const n = DISTILL_STEPS.indexOf(step);
       // update: the stage's files exist from an earlier pass, so edit them rather than start over
@@ -325,17 +429,20 @@ function makeWorkspace(id, repo) {
           step: step.id,
           step_number: `${n + 1} of ${DISTILL_STEPS.length}`,
           mode: j.mode,
-          new_turns: j.mode === 'update' && since != null && since < idea.messages.length ? transcript(idea).slice(since) : null,
+          meeting: { id: m.id, title: m.title, resumed: Boolean(m.resumes?.length) },
+          meetings_log: log,
+          new_turns: j.mode === 'update' && since != null && since < m.messages.length ? transcript(m).slice(since) : null,
           files: step.files,
           approved: [...new Set(DISTILL_STEPS.slice(0, n).flatMap((x) => x.files))].filter((f) => !step.files.includes(f)),
           context_dir: contextDir(idea.id),
           guidance: idea.distill.guidance || null,
-          verdict: idea.verdict,
-          transcript: transcript(idea),
+          verdict: m.verdict,
+          transcript: transcript(m),
         },
       };
     }
     if (j.type === 'prd') {
+      const m = meetingOf(idea, idea.prd.meeting);
       const existing = prdNames();
       j.before ??= existing; // to tell which PRDs an update added
       // update: PRDs exist from an earlier pass, so edit them (and add or drop some) rather than start over
@@ -351,8 +458,9 @@ function makeWorkspace(id, repo) {
           handed_off: existing.filter((n) => idea.handoffs?.[n]).map((n) => path.basename(n)),
           context_changed: j.mode === 'update' && idea.prd.basis != null && idea.prd.basis !== contextHash(contextNow()),
           guidance: idea.prd.guidance || null,
-          verdict: idea.verdict,
-          transcript: transcript(idea),
+          meeting: { id: m.id, title: m.title },
+          verdict: m.verdict,
+          transcript: transcript(m),
         },
       };
     }
@@ -421,24 +529,29 @@ function makeWorkspace(id, repo) {
     claudeActed();
   }
 
-  async function completeJob(j, text, question = false) {
+  async function completeJob(j, text, question = false, log = null) {
     const idea = getIdea(j.idea);
     const reply = String(text || '').trim();
     if (j.type === 'panel') {
       if (!reply) throw httpError(400, 'text (the panel reply) is required');
-      idea.messages.push({ id: shortId(), author: 'panel', text: reply, at: now() });
+      cur(idea).messages.push({ id: shortId(), author: 'panel', text: reply, at: now() });
     } else if (j.type === 'distill') {
       // A fresh pass must write every file of the stage; an update may leave a file that needed no change
       const step = stepOf(idea.distill.step);
       const stale = j.mode === 'update' ? [] : step.files.filter((f) => (fs.statSync(contextFile(idea.id, f), { throwIfNoEntry: false })?.mtimeMs ?? 0) < j.claimed_ms - 1000);
       if (stale.length) throw httpError(409, `Write ${stale.join(', ')} for the ${step.label} step first (in ${contextDir(idea.id)})`);
       Object.assign(idea.distill, { status: 'review', note: reply || null, at: now() });
+      (idea.distill.log ||= {})[step.id] = stageLog(log); // this stage's part of the meetings log; a redo replaces it
     } else if (j.type === 'prd') {
       const fresh = prdNames().filter((n) => fs.statSync(docFile(n)).mtimeMs >= j.claimed_ms - 1000);
       if (j.mode === 'create' && !fresh.length) throw httpError(409, `Write the PRDs first (01-<slug>.md, … in ${prdDir()})`);
       if (!prdNames().length) throw httpError(409, `No PRDs in ${prdDir()}. Write at least one.`);
       // PRDs an update added are new to you: the UI marks them, since there is no earlier version to compare
       const added = j.mode === 'update' ? prdNames().filter((n) => !(j.before || []).includes(n)) : [];
+      // Each PRD belongs to the meeting whose change it builds
+      const origin = (idea.prd_origin ||= {});
+      for (const n of Object.keys(origin)) if (!prdNames().includes(n)) delete origin[n];
+      for (const n of prdNames()) origin[n] ||= idea.prd.meeting || cur(idea).id;
       Object.assign(idea.prd, { status: 'review', note: reply || null, at: now(), basis: contextHash(contextNow()), updated: j.mode === 'update', added });
     } else {
       // A request the worker couldn't act on comes back as a question, which stays visible until dismissed
@@ -537,7 +650,8 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       const changes = Object.fromEntries([...context, ...prds].filter((f) => reviewed.has(f.name) && reviewed.get(f.name) !== f.content).map((f) => [f.name, reviewed.get(f.name)]));
       // The PRDs were cut from context that has changed since (a re-distill or a change request)
       const prd_stale = Boolean(prds.length && idea.prd?.basis && ['review', 'done'].includes(idea.prd.status) && idea.prd.basis !== contextHash(contextNow()));
-      return { ...idea, ...summary(idea), context, prds, changes, prd_stale };
+      const log = await readFile(LOG_FILE, 'utf8').catch(() => null);
+      return { ...idea, ...summary(idea), context, prds, changes, prd_stale, log };
     },
 
     // You've looked at the changes: stop highlighting them (one file, or all)
@@ -548,23 +662,24 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       return { ok: true };
     },
 
-    // Start a meeting: the first message is the raw hunch. One idea per repo.
+    // Start a meeting: the first message is the raw hunch. The first meeting creates the repo's context;
+    // each later one proposes a change to it. One meeting is active at a time.
     'POST /api/ideas': async (_q, b) => {
-      const existing = [...ideas.values()][0];
-      if (existing) throw httpError(409, `This repo already has an idea ("${existing.title}"). Delete it to start another.`);
       const text = userText(b);
       const title = String(b.title || '').trim() || text.split('\n')[0].slice(0, 60);
-      const idea = {
-        id: ideaSlug(title),
-        title,
-        stage: 'meeting',
-        created_at: now(),
-        updated_at: now(),
-        messages: [{ id: shortId(), author: 'you', text, at: now() }],
-        verdict: null,
-        refinements: [],
-      };
-      ideas.set(idea.id, idea);
+      const meeting = { id: 'M1', title, stage: 'open', created_at: now(), messages: [{ id: shortId(), author: 'you', text, at: now() }], verdict: null, resumes: [] };
+      let idea = [...ideas.values()][0];
+      if (idea) {
+        const m = cur(idea);
+        if (m.stage === 'open') throw httpError(409, `${m.id} is still open. Commit or kill it before starting another meeting.`);
+        if (idea.stage === 'distilling') throw httpError(409, `Finish reviewing the context from ${idea.distill.meeting || m.id} first.`);
+        if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this repo. Wait for it first.');
+        meeting.id = `M${idea.meetings.length + 1}`;
+        idea.meetings.push(meeting);
+      } else {
+        idea = { id: ideaSlug(title), title, created_at: now(), updated_at: now(), meetings: [meeting], refinements: [] };
+        ideas.set(idea.id, idea);
+      }
       await save(idea);
       broadcast('ideas_changed', {});
       wake();
@@ -573,9 +688,9 @@ End with a short summary: what changed, how to try it, and how to check each Acc
 
     'POST /api/ideas/message': async (_q, b) => {
       const idea = getIdea(b.id);
-      if (idea.stage !== 'meeting') throw httpError(409, 'The meeting is closed. Reopen it to keep talking.');
+      if (cur(idea).stage !== 'open') throw httpError(409, 'The meeting is closed. Resume it to keep talking.');
       if (job?.idea === idea.id) throw httpError(409, 'The panel is still answering. Wait for it, then reply.');
-      idea.messages.push({ id: shortId(), author: 'you', text: userText(b), at: now() });
+      cur(idea).messages.push({ id: shortId(), author: 'you', text: userText(b), at: now() });
       await save(idea);
       wake();
       return summary(idea);
@@ -593,14 +708,19 @@ End with a short summary: what changed, how to try it, and how to check each Acc
     'POST /api/ideas/verdict': async (_q, b) => {
       const idea = getIdea(b.id);
       if (!['commit', 'kill'].includes(b.decision)) throw httpError(400, 'decision must be commit or kill');
-      if (idea.stage !== 'meeting') throw httpError(409, `The idea is already ${idea.stage}.`);
+      const m = cur(idea);
+      if (m.stage !== 'open') throw httpError(409, `${m.id} is already ${m.stage}.`);
       if (job?.idea === idea.id) throw httpError(409, 'The panel is still answering. Wait for it first.');
-      idea.verdict = { decision: b.decision, note: String(b.note || '').trim() || null, at: now() };
-      idea.stage = b.decision === 'commit' ? 'distilling' : 'killed';
+      if (idea.stage === 'distilling') throw httpError(409, 'Earlier context is still under review. Approve it first.');
+      m.verdict = { decision: b.decision, note: String(b.note || '').trim() || null, at: now() };
+      m.stage = b.decision === 'commit' ? 'committed' : 'killed';
       if (b.decision === 'commit') {
-        // since: where the meeting stood at the last commit, so a re-distill knows which turns are new
-        idea.distill = { step: 'brief', status: 'queued', guidance: String(b.guidance || '').trim() || null, at: now(), since: idea.distill_basis ?? null };
-        idea.distill_basis = idea.messages.length;
+        // since: the turns this commit adds (a new meeting: all of them; a resumed one: those since its last commit).
+        // before: the context as it stood, so the log can say which files the meeting changed.
+        idea.distill = { step: 'brief', status: 'queued', guidance: String(b.guidance || '').trim() || null, at: now(), since: m.distill_basis ?? 0, meeting: m.id, before: fileHashes() };
+        m.distill_basis = m.messages.length;
+      } else {
+        appendLog(m, 'killed', null);
       }
       await save(idea);
       broadcast('ideas_changed', {});
@@ -608,14 +728,19 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       return summary(idea);
     },
 
-    // Back to the table: a killed idea gets a second hearing, or a committed one gets rethought.
-    // Its context stays until you commit again, which distills it afresh, rewriting the files in place.
-    'POST /api/ideas/reopen': async (_q, b) => {
+    // Resume the latest meeting: a killed one gets a second hearing, or a committed one gets rethought.
+    // The context stays until you commit again, which amends it with the new turns. Older meetings stay closed.
+    'POST /api/ideas/resume': async (_q, b) => {
       const idea = getIdea(b.id);
+      const m = cur(idea);
+      if (m.stage === 'open') throw httpError(409, `${m.id} is already open.`);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
-      if (idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Reopen once they land.');
-      idea.stage = 'meeting';
-      idea.verdict = null;
+      if (idea.stage === 'distilling') throw httpError(409, `The context from ${m.id} is still under review. Approve or redo it first.`);
+      if (idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Resume once they land.');
+      // changed: context files edited since the last call, so the panel (and you) know what moved meanwhile
+      (m.resumes ||= []).push({ at: now(), from: m.messages.length, changed: idea.context_basis ? changedBetween(idea.context_basis, fileHashes()) : [] });
+      m.stage = 'open';
+      m.verdict = null;
       await save(idea);
       broadcast('ideas_changed', {});
       return summary(idea);
@@ -631,9 +756,12 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       forgetReviewed(DISTILL_STEPS[n].files);
       (idea.distill.approved ||= []).push(idea.distill.step);
       if (n === DISTILL_STEPS.length - 1) {
-        idea.stage = 'distilled';
         idea.distilled = { at: now() };
         idea.distill.status = 'done';
+        // Your approval of the last stage is the call landing: log it, with the files the meeting changed
+        const after = fileHashes();
+        appendLog(meetingOf(idea, idea.distill.meeting), idea.distill.revised ? 'context redone' : 'committed', logEntry(idea, changedBetween(idea.distill.before, after)));
+        idea.context_basis = after;
       } else {
         Object.assign(idea.distill, { step: DISTILL_STEPS[n + 1].id, status: 'queued', guidance: String(b.guidance || '').trim() || null, note: null, at: now() });
       }
@@ -653,8 +781,19 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       if (b.step && (idea.stage === 'distilled' || reviewing(idea))) {
         const step = stepOf(b.step);
         if (!step) throw httpError(400, `step must be one of ${DISTILL_STEPS.map((x) => x.id).join(', ')}`);
-        idea.stage = 'distilling';
-        idea.distill = { step: step.id, status: 'queued', guidance, at: now(), since: idea.distill_basis ?? null, approved: DISTILL_STEPS.slice(0, DISTILL_STEPS.indexOf(step)).map((x) => x.id) };
+        const m = idea.distill?.meeting ? meetingOf(idea, idea.distill.meeting) : lastCommitted(idea) || cur(idea);
+        const done = idea.stage === 'distilled';
+        idea.distill = {
+          step: step.id,
+          status: 'queued',
+          guidance,
+          at: now(),
+          since: done ? (m.distill_basis ?? 0) : idea.distill.since,
+          meeting: m.id,
+          before: done ? fileHashes() : idea.distill.before,
+          revised: done || idea.distill.revised || undefined,
+          approved: DISTILL_STEPS.slice(0, DISTILL_STEPS.indexOf(step)).map((x) => x.id),
+        };
       } else if (reviewing(idea)) {
         clearRefinements(idea, stepOf(idea.distill.step).files);
         Object.assign(idea.distill, { status: 'queued', guidance, note: null, at: now() });
@@ -702,7 +841,8 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       if (idea.prd?.status === 'queued') throw httpError(409, 'The PRDs are already queued.');
       if (idea.refinements.some((r) => r.status === 'pending' && isPrd(r.file))) throw httpError(409, 'Changes you asked for are still being made. Try again once they land.');
       clearRefinements(idea, prdNames());
-      idea.prd = { status: 'queued', guidance: String(b.guidance || '').trim() || null, note: null, at: now(), basis: idea.prd?.basis ?? null };
+      // meeting: whose change these PRDs build (new PRDs are grouped under it)
+      idea.prd = { status: 'queued', guidance: String(b.guidance || '').trim() || null, note: null, at: now(), basis: idea.prd?.basis ?? null, meeting: lastCommitted(idea)?.id || cur(idea).id };
       await save(idea);
       broadcast('ideas_changed', {});
       wake();
@@ -797,6 +937,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       idea.refinements = idea.refinements.filter((r) => r.file !== name);
       if (idea.handoffs) delete idea.handoffs[name];
       if (idea.executions) delete idea.executions[name];
+      if (idea.prd_origin) delete idea.prd_origin[name];
       if (idea.prd.added) idea.prd.added = idea.prd.added.filter((n) => n !== name);
       if (!prdNames().length) delete idea.prd; // nothing left: back to planning from scratch
       await save(idea);
@@ -812,6 +953,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       await rm(IDEA_FILE, { force: true });
       await rm(contextDir(), { recursive: true, force: true });
       await rm(prdDir(), { recursive: true, force: true });
+      await rm(LOG_FILE, { force: true });
       broadcast('ideas_changed', {});
       return { ok: true };
     },
@@ -819,7 +961,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
     'GET /api/jobs/next': async (q, _b, signal) => nextJob(Number(q.get('timeout') ?? 300), signal),
     'GET /api/jobs/current': async () => (job ? jobView(job) : { job: null }),
     'POST /api/jobs/complete': async (_q, b) => {
-      await completeJob(currentJob(b.job_id), b.text, Boolean(b.question));
+      await completeJob(currentJob(b.job_id), b.text, Boolean(b.question), b.log);
       return { ok: true };
     },
     'POST /api/jobs/release': async (_q, b) => {
