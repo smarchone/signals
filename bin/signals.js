@@ -3,6 +3,8 @@
 // signals status         list the workspaces the daemon serves
 // signals remove [repo]  unregister <repo> (default: current folder) or a workspace id; its .signals/ stays on disk
 // signals stop           stop the daemon
+// signals restart        stop and start the daemon (picks up a new server.js); registered repos come back
+//                        and listening workers reconnect on their own. Refuses mid-job unless --force.
 //
 // The daemon runs detached from whoever started it (its own session, output to $SIGNALS_HOME/daemon.log),
 // so closing the terminal or Claude session that ran `signals serve` doesn't stop it.
@@ -43,7 +45,28 @@ async function startDaemon() {
   throw new Error(`The daemon didn't start. See ${LOG}`);
 }
 
-const [cmd, arg] = process.argv.slice(2);
+async function stopDaemon() {
+  await call('POST', '/api/shutdown', {});
+  for (let i = 0; i < 50; i++) {
+    if (!(await running())) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("The daemon didn't stop. See " + LOG);
+}
+
+async function printStatus() {
+  const { workspaces } = await call('GET', '/api/workspaces');
+  console.log(`Signals daemon at ${BASE}`);
+  for (const w of workspaces) {
+    const p = w.presence;
+    const state = p.job ? 'working' : p.listening ? 'listening' : 'offline';
+    console.log(`  ${w.id.padEnd(24)} ${state.padEnd(10)} ${w.root}`);
+  }
+}
+
+const args = process.argv.slice(2);
+const force = args.includes('--force');
+const [cmd, arg] = args.filter((a) => a !== '--force');
 try {
   if (cmd === 'serve') {
     const repo = path.resolve(arg || '.');
@@ -57,13 +80,7 @@ try {
     if (!(await running())) {
       console.log('The signals daemon is not running.');
     } else {
-      const { workspaces } = await call('GET', '/api/workspaces');
-      console.log(`Signals daemon at ${BASE}`);
-      for (const w of workspaces) {
-        const p = w.presence;
-        const state = p.job ? 'working' : p.listening ? 'listening' : 'offline';
-        console.log(`  ${w.id.padEnd(24)} ${state.padEnd(10)} ${w.root}`);
-      }
+      await printStatus();
     }
   } else if (cmd === 'remove') {
     if (!(await running())) {
@@ -76,15 +93,28 @@ try {
       await call('POST', '/api/workspaces/remove', { id: w.id });
       console.log(`Unregistered ${w.repo}. Its ideas stay in ${w.root}`);
     }
+  } else if (cmd === 'restart') {
+    if (await running()) {
+      const { workspaces } = await call('GET', '/api/workspaces');
+      const busy = workspaces.filter((w) => w.presence.job);
+      if (busy.length && !force) {
+        throw new Error(`A worker is mid-job in ${busy.map((w) => w.name).join(', ')}; restarting would drop it. Wait, or run: signals restart --force`);
+      }
+      await stopDaemon();
+    }
+    await startDaemon();
+    console.log('Restarted the signals daemon. Listening workers reconnect within a few seconds.');
+    await new Promise((r) => setTimeout(r, 2500)); // give pollers their retry, so status shows them
+    await printStatus();
   } else if (cmd === 'stop') {
     if (await running()) {
-      await call('POST', '/api/shutdown', {});
+      await stopDaemon();
       console.log('Stopped the signals daemon.');
     } else {
       console.log('The signals daemon is not running.');
     }
   } else {
-    console.log('Usage: signals serve [repo] | signals status | signals remove [repo|id] | signals stop');
+    console.log('Usage: signals serve [repo] | signals status | signals remove [repo|id] | signals restart [--force] | signals stop');
     process.exit(cmd ? 1 : 0);
   }
 } catch (err) {

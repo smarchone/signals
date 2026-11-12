@@ -1,12 +1,15 @@
-// Signals daemon: the decision plane for many repos.
-// Each registered repo is a workspace. Its ideas live in <repo>/.signals/ideas/<idea>/:
+// Signals daemon: the human operating plane for many repos.
+// Each registered repo is a workspace with at most one idea, in <repo>/.signals/:
 //   idea.json   the meeting transcript, the go/no-go verdict, the stage, change requests
-//   context/    the distilled context files (product, business, vocab, architecture, abstractions)
+//   context/    the distilled context files (business, product, model, vocab, architecture)
+//
+// Distilling is staged, high level first, with your review gate after each step:
+//   brief (product + business + model) -> design (vocab + architecture)
 //
 // A local Claude Code session per repo (the /signals skill) long-polls for jobs:
-//   panel    you spoke last in a meeting -> the panel (CEO, PM, Architect) answers
-//   distill  you committed an idea       -> the worker writes the context files
-//   refine   you asked for a change to a context file -> the worker edits it
+//   panel    you spoke last in a meeting       -> the panel (CEO, PM, Architect) answers
+//   distill  a distill step is queued          -> the worker writes that step's files
+//   refine   you asked for a change in a file  -> the worker edits it
 //
 //   node server.js        (or: signals serve <repo>, which starts this in the background and registers the repo)
 //
@@ -25,9 +28,15 @@ const HOME = path.resolve(process.env.SIGNALS_HOME || path.join(os.homedir(), '.
 const REGISTRY = path.join(HOME, 'workspaces.json');
 const APP_DIR = path.join(HERE, 'app');
 
-// The opinionated context set, in reading order. The worker writes exactly these.
-const CONTEXT_FILES = ['product.md', 'business.md', 'vocab.md', 'architecture.md', 'abstractions.md'];
-const STAGES = ['meeting', 'killed', 'distilling', 'distilled'];
+// The opinionated context set, in reading order, and the steps that write it.
+const CONTEXT_FILES = ['business.md', 'product.md', 'model.md', 'vocab.md', 'architecture.md'];
+const DISTILL_STEPS = [
+  { id: 'brief', label: 'Brief', files: ['business.md', 'product.md', 'model.md'] },
+  { id: 'design', label: 'Design', files: ['vocab.md', 'architecture.md'] },
+];
+// Ideas distilled under the earlier four-step flow map onto the two stages
+const LEGACY_STEP = { outline: 'brief', model: 'design', architecture: 'design' };
+const stepOf = (sid) => DISTILL_STEPS.find((x) => x.id === sid);
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 const now = () => new Date().toISOString();
@@ -45,31 +54,48 @@ function broadcastAll(event, data) {
 
 function makeWorkspace(id, repo) {
   const ROOT = path.join(repo, '.signals');
-  const IDEAS = path.join(ROOT, 'ideas');
-  fs.mkdirSync(IDEAS, { recursive: true });
+  const IDEA_FILE = path.join(ROOT, 'idea.json');
+  fs.mkdirSync(ROOT, { recursive: true });
   const broadcast = (event, data) => broadcastAll(event, { ...data, workspace: id });
 
-  // ---------- Ideas, cached in memory, one JSON file each ----------
+  // ---------- The repo's one idea, cached in memory ----------
+  // `ideas` holds at most one entry; it stays a map so routes and jobs keep addressing the idea by id.
 
   const ideas = new Map(); // id -> idea
-  const ideaDir = (iid) => path.join(IDEAS, iid);
-  const contextDir = (iid) => path.join(ideaDir(iid), 'context');
+  const contextDir = () => path.join(ROOT, 'context');
+
+  // Earlier layout: .signals/ideas/<id>/{idea.json,context/}. Move the most recent idea up, once.
+  function migrateLegacy() {
+    const legacy = path.join(ROOT, 'ideas');
+    if (fs.existsSync(IDEA_FILE) || !fs.existsSync(legacy)) return;
+    const found = fs
+      .readdirSync(legacy, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(legacy, e.name, 'idea.json')))
+      .map((e) => ({ dir: path.join(legacy, e.name), at: fs.statSync(path.join(legacy, e.name, 'idea.json')).mtimeMs }))
+      .sort((a, b) => b.at - a.at);
+    if (!found.length) return;
+    fs.renameSync(path.join(found[0].dir, 'idea.json'), IDEA_FILE);
+    if (fs.existsSync(path.join(found[0].dir, 'context')) && !fs.existsSync(contextDir())) fs.renameSync(path.join(found[0].dir, 'context'), contextDir());
+    console.log(`${id}: moved ${path.basename(found[0].dir)} to .signals/ (one idea per repo)${found.length > 1 ? `; ${found.length - 1} older idea(s) left in .signals/ideas/` : ''}`);
+  }
 
   function loadAll() {
-    for (const e of fs.readdirSync(IDEAS, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      try {
-        const idea = JSON.parse(fs.readFileSync(path.join(IDEAS, e.name, 'idea.json'), 'utf8'));
-        if (idea.stage === 'committed') idea.stage = 'distilling';
-        ideas.set(idea.id, idea);
-      } catch {}
-    }
+    migrateLegacy();
+    try {
+      const idea = JSON.parse(fs.readFileSync(IDEA_FILE, 'utf8'));
+      if (idea.stage === 'committed') idea.stage = 'distilling';
+      if (idea.stage === 'distilling' && !idea.distill) idea.distill = { step: 'brief', status: 'queued', guidance: idea.distill_guidance || null, at: now() };
+      if (idea.distill && LEGACY_STEP[idea.distill.step]) {
+        idea.distill.step = LEGACY_STEP[idea.distill.step];
+        idea.distill.approved = [...new Set((idea.distill.approved || []).map((x) => LEGACY_STEP[x] || x))].filter((x) => x !== idea.distill.step);
+      }
+      ideas.set(idea.id, idea);
+    } catch {}
   }
 
   async function save(idea) {
     idea.updated_at = now();
-    await mkdir(ideaDir(idea.id), { recursive: true });
-    await writeFile(path.join(ideaDir(idea.id), 'idea.json'), JSON.stringify(idea, null, 2));
+    await writeFile(IDEA_FILE, JSON.stringify(idea, null, 2));
     broadcast('idea_changed', { idea: idea.id });
   }
 
@@ -93,7 +119,7 @@ function makeWorkspace(id, repo) {
   }
 
   function contextFile(iid, name) {
-    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) throw httpError(400, 'file must be a context file name like vocab.md');
+    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) throw httpError(400, 'file must be a context file name like model.md');
     return path.join(contextDir(iid), name);
   }
 
@@ -107,7 +133,8 @@ function makeWorkspace(id, repo) {
       created_at: idea.created_at,
       updated_at: idea.updated_at,
       message_count: idea.messages.length,
-      waiting_on: pending ? 'claude' : idea.stage === 'meeting' ? 'you' : null,
+      distill: idea.distill || null,
+      waiting_on: pending ? 'claude' : idea.stage === 'meeting' || reviewing(idea) ? 'you' : null,
       working: job?.idea === idea.id ? job.type : null,
     };
   }
@@ -118,11 +145,19 @@ function makeWorkspace(id, repo) {
   // POST /api/jobs/complete          { job_id, text } posts the panel reply / distill summary / refine reply
   // POST /api/jobs/release           { job_id } gives the work back without an answer
 
+  // A distill step is written and waiting at your review gate
+  const reviewing = (idea) => idea.stage === 'distilling' && idea.distill?.status === 'review';
+  const canRefine = (idea) => idea.stage === 'distilled' || reviewing(idea);
+  // Finished change requests are iteration noise once their stage moves on: drop them (pending ones stay)
+  function clearRefinements(idea, files) {
+    idea.refinements = idea.refinements.filter((r) => r.status === 'pending' || !files.includes(r.file));
+  }
+
   // What an idea is waiting on Claude for, if anything (and since when)
   function needs(idea) {
     if (idea.stage === 'meeting' && idea.messages.at(-1)?.author === 'you') return { type: 'panel', at: idea.messages.at(-1).at };
-    if (idea.stage === 'distilling') return { type: 'distill', at: idea.verdict?.at || idea.updated_at };
-    if (idea.stage === 'distilled') {
+    if (idea.stage === 'distilling' && idea.distill?.status === 'queued') return { type: 'distill', at: idea.distill.at };
+    if (canRefine(idea)) {
       const r = idea.refinements.find((x) => x.status === 'pending');
       if (r) return { type: 'refine', at: r.at, refinement: r.id };
     }
@@ -158,10 +193,28 @@ function makeWorkspace(id, repo) {
       .sort((a, b) => Date.parse(a.need.at) - Date.parse(b.need.at));
     if (!pending.length) return null;
     const { idea, need } = pending[0];
-    job = { id: shortId(), type: need.type, idea: idea.id, refinement: need.refinement, claimed_at: now() };
+    job = { id: shortId(), type: need.type, idea: idea.id, refinement: need.refinement, claimed_at: now(), claimed_ms: Date.now() };
+    // Before the worker changes files you've seen, remember them as you last reviewed them (a refine can ripple)
+    rememberReviewed(need.type === 'refine' ? CONTEXT_FILES : need.type === 'distill' ? stepOf(idea.distill.step).files : []);
     broadcast('idea_changed', { idea: idea.id });
     broadcastPresence();
     return job;
+  }
+
+  // ---------- What you last reviewed, in memory only, so the UI can highlight what changed since ----------
+  // Several changes accumulate against the same baseline until you approve the stage or mark the file reviewed.
+
+  const reviewed = new Map(); // file name -> content as last reviewed
+  function rememberReviewed(files) {
+    for (const f of files) {
+      if (reviewed.has(f)) continue;
+      try {
+        reviewed.set(f, fs.readFileSync(path.join(contextDir(), f), 'utf8'));
+      } catch {} // a file that doesn't exist yet has nothing to compare against
+    }
+  }
+  function forgetReviewed(files) {
+    for (const f of files) reviewed.delete(f);
   }
 
   function transcript(idea) {
@@ -173,14 +226,24 @@ function makeWorkspace(id, repo) {
     const base = { id: j.id, type: j.type, idea: { id: idea.id, title: idea.title } };
     if (j.type === 'panel') return { job: { ...base, transcript: transcript(idea) } };
     if (j.type === 'distill') {
+      const step = stepOf(idea.distill.step);
+      const n = DISTILL_STEPS.indexOf(step);
+      // update: the stage's files exist from an earlier pass, so edit them rather than start over
+      j.mode ??= step.files.every((f) => fs.existsSync(contextFile(idea.id, f))) ? 'update' : 'create';
+      const since = idea.distill.since;
       return {
         job: {
           ...base,
-          transcript: transcript(idea),
-          verdict: idea.verdict,
-          guidance: idea.distill_guidance || null,
+          step: step.id,
+          step_number: `${n + 1} of ${DISTILL_STEPS.length}`,
+          mode: j.mode,
+          new_turns: j.mode === 'update' && since != null && since < idea.messages.length ? transcript(idea).slice(since) : null,
+          files: step.files,
+          approved: [...new Set(DISTILL_STEPS.slice(0, n).flatMap((x) => x.files))].filter((f) => !step.files.includes(f)),
           context_dir: contextDir(idea.id),
-          files: CONTEXT_FILES,
+          guidance: idea.distill.guidance || null,
+          verdict: idea.verdict,
+          transcript: transcript(idea),
         },
       };
     }
@@ -247,21 +310,22 @@ function makeWorkspace(id, repo) {
     claudeActed();
   }
 
-  async function completeJob(j, text) {
+  async function completeJob(j, text, question = false) {
     const idea = getIdea(j.idea);
     const reply = String(text || '').trim();
     if (j.type === 'panel') {
       if (!reply) throw httpError(400, 'text (the panel reply) is required');
       idea.messages.push({ id: shortId(), author: 'panel', text: reply, at: now() });
     } else if (j.type === 'distill') {
-      const have = (await contextFiles(idea.id)).map((f) => f.name);
-      const missing = CONTEXT_FILES.filter((f) => !have.includes(f));
-      if (missing.length) throw httpError(409, `Write these context files first: ${missing.join(', ')} (in ${contextDir(idea.id)})`);
-      idea.stage = 'distilled';
-      idea.distilled = { at: now(), note: reply || null };
+      // A fresh pass must write every file of the stage; an update may leave a file that needed no change
+      const step = stepOf(idea.distill.step);
+      const stale = j.mode === 'update' ? [] : step.files.filter((f) => (fs.statSync(contextFile(idea.id, f), { throwIfNoEntry: false })?.mtimeMs ?? 0) < j.claimed_ms - 1000);
+      if (stale.length) throw httpError(409, `Write ${stale.join(', ')} for the ${step.label} step first (in ${contextDir(idea.id)})`);
+      Object.assign(idea.distill, { status: 'review', note: reply || null, at: now() });
     } else {
+      // A request the worker couldn't act on comes back as a question, which stays visible until dismissed
       const r = idea.refinements.find((x) => x.id === j.refinement);
-      if (r) Object.assign(r, { status: 'done', reply: reply || 'Done.', done_at: now() });
+      if (r) Object.assign(r, { status: question ? 'asked' : 'done', reply: reply || 'Done.', done_at: now() });
     }
     endJob();
     await save(idea);
@@ -273,11 +337,12 @@ function makeWorkspace(id, repo) {
   const watchTimers = new Map();
   let watcher = null;
   try {
-    watcher = fs.watch(IDEAS, { recursive: true }, (_type, filename) => {
+    watcher = fs.watch(ROOT, { recursive: true }, (_type, filename) => {
       if (!filename) return;
       const parts = filename.split(path.sep);
-      if (parts[1] !== 'context' || !filename.endsWith('.md')) return;
-      const iid = parts[0];
+      if (parts[0] !== 'context' || parts.length !== 2 || !filename.endsWith('.md')) return;
+      const iid = [...ideas.keys()][0];
+      if (!iid) return;
       clearTimeout(watchTimers.get(iid));
       watchTimers.set(iid, setTimeout(() => broadcast('context_changed', { idea: iid }), 150));
       if (job?.idea === iid) claudeActed();
@@ -302,11 +367,24 @@ function makeWorkspace(id, repo) {
 
     'GET /api/idea': async (q) => {
       const idea = getIdea(q.get('id'));
-      return { ...idea, ...summary(idea), context: await contextFiles(idea.id) };
+      const context = await contextFiles(idea.id);
+      // For each file changed since you last reviewed it: the content you reviewed
+      const changes = Object.fromEntries(context.filter((f) => reviewed.has(f.name) && reviewed.get(f.name) !== f.content).map((f) => [f.name, reviewed.get(f.name)]));
+      return { ...idea, ...summary(idea), context, changes };
     },
 
-    // Start a meeting: the first message is the raw hunch
+    // You've looked at the changes: stop highlighting them (one file, or all)
+    'POST /api/ideas/reviewed': async (_q, b) => {
+      const idea = getIdea(b.id);
+      forgetReviewed(b.file ? [path.basename(contextFile(idea.id, b.file))] : CONTEXT_FILES);
+      broadcast('idea_changed', { idea: idea.id });
+      return { ok: true };
+    },
+
+    // Start a meeting: the first message is the raw hunch. One idea per repo.
     'POST /api/ideas': async (_q, b) => {
+      const existing = [...ideas.values()][0];
+      if (existing) throw httpError(409, `This repo already has an idea ("${existing.title}"). Delete it to start another.`);
       const text = userText(b);
       const title = String(b.title || '').trim() || text.split('\n')[0].slice(0, 60);
       const idea = {
@@ -352,17 +430,23 @@ function makeWorkspace(id, repo) {
       if (job?.idea === idea.id) throw httpError(409, 'The panel is still answering. Wait for it first.');
       idea.verdict = { decision: b.decision, note: String(b.note || '').trim() || null, at: now() };
       idea.stage = b.decision === 'commit' ? 'distilling' : 'killed';
-      if (b.decision === 'commit') idea.distill_guidance = String(b.guidance || '').trim() || null;
+      if (b.decision === 'commit') {
+        // since: where the meeting stood at the last commit, so a re-distill knows which turns are new
+        idea.distill = { step: 'brief', status: 'queued', guidance: String(b.guidance || '').trim() || null, at: now(), since: idea.distill_basis ?? null };
+        idea.distill_basis = idea.messages.length;
+      }
       await save(idea);
       broadcast('ideas_changed', {});
       wake();
       return summary(idea);
     },
 
-    // Back to the table: a killed idea gets a second hearing, or a distilled one gets rethought
+    // Back to the table: a killed idea gets a second hearing, or a committed one gets rethought.
+    // Its context stays until you commit again, which distills it afresh, rewriting the files in place.
     'POST /api/ideas/reopen': async (_q, b) => {
       const idea = getIdea(b.id);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
+      if (idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Reopen once they land.');
       idea.stage = 'meeting';
       idea.verdict = null;
       await save(idea);
@@ -370,14 +454,48 @@ function makeWorkspace(id, repo) {
       return summary(idea);
     },
 
-    // Distill again from the transcript (overwrites the context files)
-    'POST /api/ideas/redistill': async (_q, b) => {
+    // Pass the review gate: the next distill step starts, or the idea is distilled
+    'POST /api/ideas/approve': async (_q, b) => {
       const idea = getIdea(b.id);
-      if (idea.stage !== 'distilled') throw httpError(409, 'Only a distilled idea can be distilled again.');
-      if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
-      idea.stage = 'distilling';
-      idea.distill_guidance = String(b.guidance || '').trim() || null;
+      if (!reviewing(idea)) throw httpError(409, 'Nothing is waiting for your review.');
+      if (job?.idea === idea.id || idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Approve once they land.');
+      const n = DISTILL_STEPS.findIndex((x) => x.id === idea.distill.step);
+      clearRefinements(idea, DISTILL_STEPS[n].files);
+      forgetReviewed(DISTILL_STEPS[n].files);
+      (idea.distill.approved ||= []).push(idea.distill.step);
+      if (n === DISTILL_STEPS.length - 1) {
+        idea.stage = 'distilled';
+        idea.distilled = { at: now() };
+        idea.distill.status = 'done';
+      } else {
+        Object.assign(idea.distill, { step: DISTILL_STEPS[n + 1].id, status: 'queued', guidance: String(b.guidance || '').trim() || null, note: null, at: now() });
+      }
       await save(idea);
+      broadcast('ideas_changed', {});
+      wake();
+      return summary(idea);
+    },
+
+    // Redo. With step, restart the distill from that step; without, redo the step under review. Existing files
+    // are updated in place (job mode 'update'). Guidance is the human's direction for the change.
+    'POST /api/ideas/redo': async (_q, b) => {
+      const idea = getIdea(b.id);
+      if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
+      if (idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Redo once they land.');
+      const guidance = String(b.guidance || '').trim() || null;
+      if (b.step && (idea.stage === 'distilled' || reviewing(idea))) {
+        const step = stepOf(b.step);
+        if (!step) throw httpError(400, `step must be one of ${DISTILL_STEPS.map((x) => x.id).join(', ')}`);
+        idea.stage = 'distilling';
+        idea.distill = { step: step.id, status: 'queued', guidance, at: now(), since: idea.distill_basis ?? null, approved: DISTILL_STEPS.slice(0, DISTILL_STEPS.indexOf(step)).map((x) => x.id) };
+      } else if (reviewing(idea)) {
+        clearRefinements(idea, stepOf(idea.distill.step).files);
+        Object.assign(idea.distill, { status: 'queued', guidance, note: null, at: now() });
+      } else {
+        throw httpError(409, 'Only a step under review, or a distilled idea, can be redone.');
+      }
+      await save(idea);
+      broadcast('ideas_changed', {});
       wake();
       return summary(idea);
     },
@@ -385,7 +503,7 @@ function makeWorkspace(id, repo) {
     // Ask for a change to one context file, optionally anchored to a quote
     'POST /api/ideas/refine': async (_q, b) => {
       const idea = getIdea(b.id);
-      if (idea.stage !== 'distilled') throw httpError(409, 'Context files can be refined once the idea is distilled.');
+      if (!canRefine(idea)) throw httpError(409, 'Context files can be changed while a step is under review, or once the idea is distilled.');
       const abs = contextFile(idea.id, b.file);
       if (!fs.existsSync(abs)) throw httpError(404, `No context file ${b.file}`);
       const r = { id: shortId(), file: path.basename(abs), quote: String(b.quote || '').trim() || null, text: userText(b), status: 'pending', at: now() };
@@ -395,11 +513,23 @@ function makeWorkspace(id, repo) {
       return r;
     },
 
+    // Close a question the worker asked about a change request
+    'POST /api/ideas/refine/dismiss': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const before = idea.refinements.length;
+      idea.refinements = idea.refinements.filter((r) => !(r.id === b.refinement && r.status !== 'pending'));
+      if (idea.refinements.length === before) throw httpError(404, `No finished change request ${b.refinement}`);
+      await save(idea);
+      return { ok: true };
+    },
+
     'POST /api/ideas/delete': async (_q, b) => {
       const idea = getIdea(b.id);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
       ideas.delete(idea.id);
-      await rm(ideaDir(idea.id), { recursive: true, force: true });
+      forgetReviewed(CONTEXT_FILES);
+      await rm(IDEA_FILE, { force: true });
+      await rm(contextDir(), { recursive: true, force: true });
       broadcast('ideas_changed', {});
       return { ok: true };
     },
@@ -407,7 +537,7 @@ function makeWorkspace(id, repo) {
     'GET /api/jobs/next': async (q, _b, signal) => nextJob(Number(q.get('timeout') ?? 300), signal),
     'GET /api/jobs/current': async () => (job ? jobView(job) : { job: null }),
     'POST /api/jobs/complete': async (_q, b) => {
-      await completeJob(currentJob(b.job_id), b.text);
+      await completeJob(currentJob(b.job_id), b.text, Boolean(b.question));
       return { ok: true };
     },
     'POST /api/jobs/release': async (_q, b) => {
@@ -427,10 +557,9 @@ function makeWorkspace(id, repo) {
     root: ROOT,
     routes,
     presence,
-    counts: () => {
-      const c = Object.fromEntries(STAGES.map((s) => [s, 0]));
-      for (const i of ideas.values()) c[i.stage] = (c[i.stage] || 0) + 1;
-      return c;
+    idea: () => {
+      const i = [...ideas.values()][0];
+      return i ? summary(i) : null;
     },
     close: () => watcher?.close(),
   };
@@ -467,7 +596,16 @@ async function loadRegistry() {
   }
 }
 
-const describe = (w) => ({ id: w.id, name: path.basename(w.repo), repo: w.repo, root: w.root, presence: w.presence(), counts: w.counts() });
+// path: the repo folder shown with ~ for the home directory
+const describe = (w) => ({
+  id: w.id,
+  name: path.basename(w.repo),
+  repo: w.repo,
+  path: w.repo.startsWith(os.homedir()) ? `~${w.repo.slice(os.homedir().length)}` : w.repo,
+  root: w.root,
+  presence: w.presence(),
+  idea: w.idea(),
+});
 
 const globalRoutes = {
   'GET /api/workspaces': async () => ({ workspaces: [...workspaces.values()].map(describe) }),
