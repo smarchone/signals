@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signals</title>
+  <meta name="description" content="A control plane for human decisions and context. Vet ideas with a founding panel, distill context your agents build from, and hand off PRDs in build order.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='5' fill='%23de8a68'/><circle cx='16' cy='16' r='11' fill='none' stroke='%23de8a68' stroke-width='2' opacity='.5'/></svg>">
+  <style>
+    :root {
+      --bg:#121214; --win:#18181b; --bar:#1d1d21; --line:#2b2b30; --code:#212126; --card:#17171a;
+      --fg:#cfcdc8; --dim:#8c8a85; --faint:#5a5955; --white:#ecebe6; --accent:#de8a68; --accent-soft:rgba(222,138,104,.12);
+      --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans:system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    * { box-sizing:border-box; }
+    html, body { background:var(--bg); color:var(--fg); margin:0; }
+    body { font:15px/1.65 var(--sans); padding:56px 16px 48px; -webkit-font-smoothing:antialiased;
+           background:radial-gradient(900px 420px at 50% -120px, rgba(222,138,104,.10), transparent 70%) no-repeat, var(--bg); }
+    main { max-width:860px; margin:0 auto; }
+    a { color:inherit; }
+
+    h1 { font:600 13px/1 var(--mono); color:var(--dim); margin:0; letter-spacing:-.01em; }
+    h1 span { color:var(--accent); }
+    .top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 22px; }
+    .repo { display:inline-flex; align-items:center; gap:9px; font:600 14px/1 var(--sans); color:#1a1310; text-decoration:none;
+            background:linear-gradient(100deg, #f0b48f, #de8a68 60%, #c96a4a); border-radius:999px; padding:10px 16px 10px 14px;
+            box-shadow:0 0 0 1px rgba(240,180,143,.35), 0 8px 24px -8px rgba(222,138,104,.6); transition:transform .15s, box-shadow .2s; }
+    .repo svg { width:18px; height:18px; }
+    .repo:hover { transform:translateY(-1px); box-shadow:0 0 0 1px rgba(240,180,143,.6), 0 12px 30px -8px rgba(222,138,104,.8); }
+    .hero { margin:0 0 14px; font:700 clamp(34px, 7vw, 56px)/1.05 var(--sans); color:var(--white); letter-spacing:-.035em; }
+    .hero em { font-style:normal; color:var(--accent);
+               background:linear-gradient(100deg, #f0b48f, #de8a68 55%, #c96a4a); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+    .tldr { color:var(--fg); margin:0 0 22px; max-width:640px; }
+    .tldr span { font:11px/1 var(--mono); color:var(--accent); text-transform:uppercase; letter-spacing:.1em; margin-right:8px; }
+
+    .lbl { font:11px/1 var(--mono); color:var(--accent); text-transform:uppercase; letter-spacing:.1em; }
+
+    .not { margin:0 0 14px; color:var(--dim); font-size:15px; max-width:680px; }
+    .not b { color:var(--white); font-weight:600; }
+
+    .eyebrow { font:600 12px/1 var(--mono); color:var(--faint); text-transform:uppercase; letter-spacing:.12em; margin:0 0 14px; }
+    .blurb { color:var(--dim); font-size:14px; margin:0 0 16px; }
+
+    .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr; align-items:stretch; gap:10px; margin:32px 0 52px; }
+    .step { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 14px 16px; min-width:0; transition:border-color .2s; }
+    .step:hover { border-color:#3a3a40; }
+    .step.core { border-color:rgba(222,138,104,.45); background:linear-gradient(180deg, var(--accent-soft), transparent 70%), var(--card); }
+    .step h3 { font:600 15px/1.3 var(--sans); color:var(--white); margin:8px 0 6px; }
+    .step p { color:var(--dim); font-size:13px; line-height:1.55; margin:0; }
+    .flow > b { display:flex; align-items:center; color:var(--dim); font:400 16px var(--mono); }
+    /* ---- what you get ---- */
+    .lead { color:var(--fg); margin:0 0 14px; }
+    .get { list-style:none; padding:0; margin:0 0 52px; display:grid; gap:12px; max-width:720px; }
+    .get li { position:relative; padding-left:22px; font-size:15px; line-height:1.6; }
+    .get li::before { content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border-radius:50%; background:var(--accent); }
+    .get b { color:var(--white); font-weight:600; }
+    .get span { color:var(--dim); }
+    .get code { font:13px var(--mono); color:var(--fg); background:var(--code); padding:1px 5px; border-radius:4px; }
+
+    /* ---- architecture ---- */
+    .arch { display:flex; align-items:baseline; gap:20px; margin:0 0 52px; }
+    .node { min-width:0; }
+    .node h3 { font:600 16px/1.3 var(--sans); color:var(--white); margin:0 0 2px; }
+    .node.core h3 { color:var(--accent); }
+    .node p { color:var(--dim); font-size:14px; line-height:1.5; margin:0; }
+    .node code { font:13px var(--mono); color:var(--accent); }
+    .wire { color:var(--faint); font-size:16px; }
+
+    .install { display:flex; flex-direction:column; gap:8px; font:13px var(--mono); }
+    .cmd { display:flex; align-items:center; gap:10px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+    .cmd code { flex:1; min-width:0; overflow-x:auto; white-space:nowrap; color:var(--fg); scrollbar-width:none; }
+    .cmd code.cc { color:var(--accent); }
+    .cmd .note { color:var(--faint); white-space:nowrap; }
+    .cmd button { font:12px var(--mono); color:var(--dim); background:none; border:0; cursor:pointer; padding:0; }
+    .cmd button:hover { color:var(--accent); }
+    .or { color:var(--faint); font:12px var(--mono); margin:4px 0 0; }
+    .gh-line { margin:28px 0 0; text-align:right; font:13px var(--mono); }
+    .gh-line a { color:var(--dim); text-decoration:none; display:inline-flex; align-items:center; gap:8px; }
+    .gh-line a:hover { color:var(--accent); }
+    .foot { color:var(--faint); font:12px var(--mono); margin-top:28px; text-align:center; }
+
+    @media (max-width:700px) {
+      body { padding-top:28px; }
+        .flow { grid-template-columns:minmax(0, 1fr); }
+      .flow > b { justify-content:center; transform:rotate(90deg); }
+      .arch { flex-direction:column; align-items:flex-start; gap:6px; }
+      .wire { transform:rotate(90deg); margin-left:4px; }
+        .cmd .note { display:none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1><span>~/</span>smarchone/signals</h1>
+    <a class="repo" href="https://github.com/smarchone/signals" aria-label="smarchone/signals on GitHub"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>Star on GitHub</span></a>
+  </header>
+
+  <p class="hero">You brainstorm.<br><em>Signals</em> derives the context.<br>Agents write the code.</p>
+  <p class="tldr"><span>tl;dr</span> A control plane experience for building context (signals); helps you ideate, build and inject context files into any repo.</p>
+
+  <p class="not"><b>Not another spec-driven flow.</b> You never write a spec. You argue the idea with a panel and make the call. Signals distills the context and keeps it current; you only approve what changed.</p>
+  <p class="not"><b>Not another agent orchestrator.</b> Signals stops at the PRD. Build it with Claude Code or whatever agent and workflow you already use.</p>
+
+  <section class="flow">
+    <div class="step"><span class="lbl">01</span><h3>Meeting</h3><p>CEO, PM and Architect vet the idea.</p></div>
+    <b>→</b>
+    <div class="step"><span class="lbl">02</span><h3>Context</h3><p>business · product · model · vocab · architecture</p></div>
+    <b>→</b>
+    <div class="step"><span class="lbl">03</span><h3>PRDs</h3><p>3–7, in build order.</p></div>
+    <b>→</b>
+    <div class="step core"><span class="lbl">04</span><h3>Execute</h3><p>One PRD per PR, with Claude Code or your agent.</p></div>
+  </section>
+  <p class="eyebrow">What you get</p>
+  <p class="lead">Signals is a local daemon that runs the step before the code.</p>
+  <ul class="get">
+    <li><b>Ideate in one place.</b> <span>A central server at <code>localhost:3461</code> hosts every repo's meetings, decisions and context in a single browser UI.</span></li>
+    <li><b>Inject context signals.</b> <span>Each repo keeps one living context: a few short files in <code>.signals/context/</code> that any agent can read.</span></li>
+    <li><b>Bring your own orchestrator.</b> <span>Signals hands off PRDs in build order. Execute them with Claude Code, or copy the prompt into whatever agent or workflow you already use.</span></li>
+  </ul>
+
+  <p class="eyebrow">Architecture</p>
+  <section class="arch">
+    <div class="node"><h3>Signals UI</h3><p>Meetings, Context, PRDs, Execute.</p></div>
+    <span class="wire">⇄</span>
+    <div class="node core"><h3>Daemon</h3><p>One for all your registered repos.</p></div>
+    <span class="wire">⇄</span>
+    <div class="node"><h3>Claude Code</h3><p><code>/signals</code> polls the daemon for jobs.</p></div>
+  </section>
+
+  <div class="install">
+    <p class="eyebrow" style="margin:0 0 6px">Quick start</p>
+    <div class="cmd"><code>git clone https://github.com/smarchone/signals && cd signals</code><button data-copy>copy</button></div>
+    <div class="cmd"><code>npm link</code><span class="note">Node 22+</span><button data-copy>copy</button></div>
+    <div class="cmd"><code>npx skills add . -g</code><span class="note">installs /signals</span><button data-copy>copy</button></div>
+    <div class="cmd"><code class="cc">/signals</code><span class="note">in Claude Code, in your repo</span><button data-copy>copy</button></div>
+    <div class="cmd"><code>signals serve /path/to/repo</code><span class="note">registers your repo</span><button data-copy>copy</button></div>
+    <p class="or">Then open http://127.0.0.1:3461 and pitch your idea.</p>
+  </div>
+  <p class="gh-line"><a href="https://github.com/smarchone/signals"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub →</a></p>
+  <p class="foot">You steer the why and the shape. Agents handle the rest.</p>
+</main>
+
+<script>
+document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
+  try { await navigator.clipboard.writeText(b.parentElement.querySelector("code").textContent); b.textContent = "copied"; }
+  catch { b.textContent = "select it"; }
+});
+</script>
+</body>
+</html>
