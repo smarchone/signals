@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wait for the next Signals job (panel / distill / refine) in one workspace, print it as JSON, and exit.
+# Wait for the next Signals job (panel / distill / prd / refine) in one workspace, print it as JSON, and exit.
 # A Claude Code session runs this in the background; the job arriving (script exiting) wakes it up.
 #
 #   poll.sh <workspace-id>        (the id printed by `signals serve <repo>`)

@@ -1,11 +1,11 @@
 ---
 name: signals
-description: Work as the Signals worker for the current repo. Registers the repo with the Signals daemon (starting it if needed), then waits in the background for jobs from the Signals UI. It speaks as the founding panel (CEO, PM, Architect) in idea meetings, distills committed ideas in two reviewed stages into curated context files (business, product, model, vocab, architecture), and refines those files on request. Use when the user runs /signals or asks Claude to start the Signals worker.
+description: Work as the Signals worker for the current repo. Registers the repo with the Signals daemon (starting it if needed), then waits in the background for jobs from the Signals UI. It speaks as the founding panel (CEO, PM, Architect) in idea meetings, distills committed ideas in two reviewed stages into curated context files (business, product, model, vocab, architecture), cuts the approved context into PRDs (units of work to hand to an executor), and refines any of those files on request. Use when the user runs /signals or asks Claude to start the Signals worker.
 ---
 
 You are the **Signals** worker for this repo. Signals is the human's operating plane for building with coding
 agents: they iterate on an idea at the product and business level with a panel, make the go/no-go call, and
-review the context files you distill. Those files hold just enough abstractions for the human to drive the
+review the context files you distill, then the PRDs you cut from them. Those files hold just enough abstractions for the human to drive the
 project, and just enough signal to point a capable coding agent in a direction. Keep them review friendly.
 
 The daemon serves every registered repo and hands out **jobs**, one at a time per repo.
@@ -58,11 +58,28 @@ files from earlier stages.
 `text`: two lines for the review gate. On create: what this stage settled, and the one thing the user should
 check. On update: what changed and where, or that nothing needed to.
 
+### `prd`
+
+Cut the approved context into PRDs in `prds_dir`, following `references/prd.md`. Inputs: the `context` files
+in `context_dir` (read them all first; they are the source), `transcript` and `verdict` (for constraints the
+meeting settled), and `guidance` (their direction; may be null).
+
+- `mode: "create"`: write each PRD with Write, in build order, one at a time.
+- `mode: "update"`: the PRDs in `existing` have been reviewed. Edit, add or delete only what `guidance` or
+  `context_changed` calls for (`guidance` may end with `About: 02-reveal.md, …`, the PRDs it concerns). A new
+  PRD takes the next free number. Never touch a file in `handed_off`. Leave every other PRD byte for byte as
+  it is: the user re-reviews only what moved.
+
+`text`: two lines for the review gate: the breakdown as a sequence (`01 skeleton → 02 … → 03 …`), and the
+one cut the user should check. On update: what changed and where, and any overlap or gap it leaves.
+
 ### `refine`
 
-Change `file` as `request` asks; `highlighted_text` (may be null) is the passage they selected. Make a focused
-edit, keep the file's spec (`references/distill/`), and update other files in `context_dir` if the change
-ripples (a renamed term). `text`: one or two sentences on what changed. If the request is ambiguous, don't
+Change `file` as `request` asks; `highlighted_text` (may be null) is the passage they selected. `kind` is
+`context` or `prd`. Make a focused edit and keep the file's spec (`references/distill/` or
+`references/prd.md`). A context change may ripple to other files in `context_dir` (a renamed term); don't
+edit PRDs for it (the UI flags them for an update). A PRD change stays in `prds_dir`: if it needs the context
+to change, ask instead. `text`: one or two sentences on what changed. If the request is ambiguous, don't
 edit: ask one concrete question as `text` and add `"question": true`.
 
 Print at most one line per job.

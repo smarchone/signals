@@ -13,10 +13,11 @@ prompt fights. Traditional SDLC fixes that with process and micromanagement. Sig
 at the context layer (the *why* and the *shape*), and agents work at the code layer.
 
 ```
-  meeting ──▶ verdict ──▶ distill, high level first ─────────────────────▶ (bring your own executor)
-  panel:      you:        business.md · product.md · model.md
-  CEO·PM·     commit      ─ ─ ─ ─ ─ ─ you approve ─ ─ ─ ─ ─ ─
-  Architect   or kill     vocab.md · architecture.md          ◀ you approve
+  meeting ──▶ verdict ──▶ distill, high level first ─────────▶ PRDs ─────────────▶ hand off
+  panel:      you:        business.md · product.md · model.md   01-skeleton.md      (bring your own
+  CEO·PM·     commit      ─ ─ ─ ─ ─ ─ you approve ─ ─ ─ ─ ─ ─   02-….md             executor), one
+  Architect   or kill     vocab.md · architecture.md            ◀ you approve       PRD per PR
+                                                   ◀ you approve
 ```
 
 ## How it works
@@ -36,7 +37,8 @@ Jobs are derived from each idea's state, one at a time per repo:
 |-----|------|-------------|
 | `panel` | you spoke last in a meeting | answers as CEO, PM and Architect, ending on the sharpest question |
 | `distill` | on commit, or when you approve business, product and model | writes the next files while you watch, then waits for your approval |
-| `refine` | you asked for a change on a context file (or a selection in it) | edits the file, and the others if the change ripples |
+| `prd` | you ask for PRDs once the context is approved, or to update them | cuts the context into PRDs in build order, then waits for your approval |
+| `refine` | you asked for a change on a context file or PRD (or a selection in it) | edits the file, and the others if the change ripples |
 
 At each approval you **approve**, **ask for a change** on any selection, or **redo** with guidance.
 The files are curated signals, not documentation: `model.md` is the product as composed abstractions, high
@@ -44,8 +46,18 @@ level only; `vocab.md` pins 10–15 terms by domain, each domain explained in it
 explains how those domains compose into the product, then shows it as a hexagonal sketch with its ports and
 adapters: an initial direction rather than a decision log.
 
-A repo has one idea, in `<repo>/.signals/`: `idea.json` (transcript, verdict, change requests) and
-`context/*.md`. To change distilled context, reopen the meeting (the new turns flow
+**PRDs** are the plan layer and the unit of work: the context cut into three to seven PRs' worth, in build
+order, starting with a walking skeleton of the whole loop. Each holds the outcome, scope, constraints,
+decisions and acceptance checks for one PR, and points to the context rather than restating it. Once you
+approve them, **Execute** builds one in a background Claude Code session (`claude --bg`) right on your checkout,
+one PRD at a time: you test it, steer it with `claude attach <id>`, commit, and **Mark complete** to free the
+next. Or **Copy prompt** for your own coding agent. Either way the PRD is marked handed off; later updates
+leave handed-off PRDs alone and add follow-ups instead. To add a PRD or reshape the set, say so in plain words
+under **Add or change PRDs**; you re-review only what moved. If the context changes, the PRDs are flagged for an
+update.
+
+A repo has one idea, in `<repo>/.signals/`: `idea.json` (transcript, verdict, change requests, handoffs),
+`context/*.md` and `prds/*.md`. To change distilled context, reopen the meeting (the new turns flow
 into the files as edits) or ask for a change on any file; either way only what moved is edited, and highlighted
 until you mark it reviewed. To vet a different idea, delete the current one. Commit `.signals/` with your repo; it is the shared
 mental model.
@@ -68,9 +80,9 @@ signals stop            # stop the daemon
 
 The opinions live in the skill: `references/panel.md` (how the panel speaks) and `references/distill/`
 (`common.md` for every file; `brief.md` covers business, product and model, and `design.md` vocabulary and
-architecture). Change those to change the house style.
+architecture), and `references/prd.md` (the plan layer). Change those to change the house style.
 
 ## Not yet
 
-Milestones and PRDs (the plan layer, where constraints and decisions live), handing the context to an
-executor, replying to the worker's questions in place, and drift detection.
+Driving an executor directly (GitHub issues, an abstractor/implementor split) and watching the PRs that come
+back, replying to the worker's questions in place, and drift detection.

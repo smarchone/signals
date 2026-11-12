@@ -33,7 +33,8 @@ files and never contradict them. If `guidance` is set, follow it.
   mechanisms. Say what must be true ("the same Daily case for everyone, no server"), never the formula, key,
   file layout, schema or algorithm.
 - **Opinionated.** State choices, not options.
-- **No plans.** Milestones, PRDs, tasks, constraints and decision logs belong to the plan layer downstream.
+- **No plans.** Milestones, tasks, constraints and decision logs belong to the PRDs (`../prd.md`), cut from
+  this context once it is approved.
 
 ## Attention budget
 

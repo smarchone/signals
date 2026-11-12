@@ -2,14 +2,18 @@
 // Each registered repo is a workspace with at most one idea, in <repo>/.signals/:
 //   idea.json   the meeting transcript, the go/no-go verdict, the stage, change requests
 //   context/    the distilled context files (business, product, model, vocab, architecture)
+//   prds/       the plan layer: PRDs (01-<slug>.md, …), units of work to hand to an executor
 //
 // Distilling is staged, high level first, with your review gate after each step:
 //   brief (product + business + model) -> design (vocab + architecture)
+// Once distilled, you ask for PRDs; they get their own review gate, then each one can be handed off: copied as a
+// prompt for your own agent, or executed here in a background Claude Code session (claude --bg), one at a time.
 //
 // A local Claude Code session per repo (the /signals skill) long-polls for jobs:
 //   panel    you spoke last in a meeting       -> the panel (CEO, PM, Architect) answers
 //   distill  a distill step is queued          -> the worker writes that step's files
-//   refine   you asked for a change in a file  -> the worker edits it
+//   prd      you asked for PRDs                 -> the worker cuts the context into PRDs
+//   refine   you asked for a change in a file  -> the worker edits it (context file or PRD)
 //
 //   node server.js        (or: signals serve <repo>, which starts this in the background and registers the repo)
 //
@@ -21,6 +25,7 @@ import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3461;
@@ -34,6 +39,8 @@ const DISTILL_STEPS = [
   { id: 'brief', label: 'Brief', files: ['business.md', 'product.md', 'model.md'] },
   { id: 'design', label: 'Design', files: ['vocab.md', 'architecture.md'] },
 ];
+const PRD_DIR = 'prds'; // relative names of PRDs carry this prefix (prds/01-skeleton.md); context files are bare
+const isPrd = (name) => name.startsWith(`${PRD_DIR}/`);
 // Ideas distilled under the earlier four-step flow map onto the two stages
 const LEGACY_STEP = { outline: 'brief', model: 'design', architecture: 'design' };
 const stepOf = (sid) => DISTILL_STEPS.find((x) => x.id === sid);
@@ -41,6 +48,23 @@ const stepOf = (sid) => DISTILL_STEPS.find((x) => x.id === sid);
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 const now = () => new Date().toISOString();
 const shortId = () => randomUUID().slice(0, 8);
+
+// ---------- Claude Code background sessions (claude --bg), which build PRDs ----------
+
+const CLAUDE = process.env.SIGNALS_CLAUDE || 'claude';
+function runClaude(args, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn(CLAUDE, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    const timer = setTimeout(() => child.kill(), 60000);
+    child.on('error', (err) => (clearTimeout(timer), resolve({ code: -1, out: err.message })));
+    child.on('close', (code) => (clearTimeout(timer), resolve({ code, out })));
+  });
+}
+// A session's state in `claude agents --json`, as an execution status
+const SESSION_STATUS = { working: 'building', blocked: 'blocked', done: 'built' };
 
 // ---------- Live updates (SSE), shared by all workspaces ----------
 
@@ -123,6 +147,28 @@ function makeWorkspace(id, repo) {
     return path.join(contextDir(iid), name);
   }
 
+  // PRDs: .signals/prds/*.md, named by their relative path (prds/01-skeleton.md) so they never clash with context
+  const prdDir = () => path.join(ROOT, PRD_DIR);
+  async function prdFiles() {
+    const names = (await readdir(prdDir()).catch(() => [])).filter((n) => n.endsWith('.md')).sort();
+    return Promise.all(names.map(async (n) => ({ name: `${PRD_DIR}/${n}`, content: await readFile(path.join(prdDir(), n), 'utf8') })));
+  }
+  const prdNames = () => (fs.existsSync(prdDir()) ? fs.readdirSync(prdDir()).filter((n) => n.endsWith('.md')).sort().map((n) => `${PRD_DIR}/${n}`) : []);
+  // Any reviewable document by its relative name: a context file (model.md) or a PRD (prds/01-skeleton.md)
+  function docFile(name) {
+    if (typeof name === 'string' && isPrd(name)) {
+      const base = name.slice(PRD_DIR.length + 1);
+      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(base)) throw httpError(400, 'file must be a PRD name like prds/01-skeleton.md');
+      return path.join(prdDir(), base);
+    }
+    return contextFile(null, name);
+  }
+  const docName = (abs) => (path.dirname(abs) === prdDir() ? `${PRD_DIR}/${path.basename(abs)}` : path.basename(abs));
+  // The context the PRDs were cut from, so the UI can say when it has moved on since
+  const contextHash = (context) => createHash('sha1').update(context.map((f) => `${f.name}\0${f.content}`).join('\0')).digest('hex').slice(0, 12);
+  const contextNow = () =>
+    CONTEXT_FILES.filter((f) => fs.existsSync(contextFile(null, f))).map((f) => ({ name: f, content: fs.readFileSync(contextFile(null, f), 'utf8') }));
+
   function summary(idea) {
     const pending = needs(idea);
     return {
@@ -134,7 +180,8 @@ function makeWorkspace(id, repo) {
       updated_at: idea.updated_at,
       message_count: idea.messages.length,
       distill: idea.distill || null,
-      waiting_on: pending ? 'claude' : idea.stage === 'meeting' || reviewing(idea) ? 'you' : null,
+      prd: idea.prd || null,
+      waiting_on: pending ? 'claude' : idea.stage === 'meeting' || reviewing(idea) || reviewingPrds(idea) ? 'you' : null,
       working: job?.idea === idea.id ? job.type : null,
     };
   }
@@ -148,6 +195,11 @@ function makeWorkspace(id, repo) {
   // A distill step is written and waiting at your review gate
   const reviewing = (idea) => idea.stage === 'distilling' && idea.distill?.status === 'review';
   const canRefine = (idea) => idea.stage === 'distilled' || reviewing(idea);
+  // PRDs are written and waiting at their review gate; once approved, they can be changed or handed off
+  const reviewingPrds = (idea) => idea.stage === 'distilled' && idea.prd?.status === 'review';
+  const canRefineDoc = (idea, name) => (isPrd(name) ? ['review', 'done'].includes(idea.prd?.status) && !prdLocked(idea, name) : canRefine(idea));
+  // A PRD being executed, or complete, is what was built: it stays as it is (a stopped one can still change)
+  const prdLocked = (idea, name) => ['building', 'blocked', 'built', 'gone', 'complete'].includes(idea.executions?.[name]?.status);
   // Finished change requests are iteration noise once their stage moves on: drop them (pending ones stay)
   function clearRefinements(idea, files) {
     idea.refinements = idea.refinements.filter((r) => r.status === 'pending' || !files.includes(r.file));
@@ -157,8 +209,9 @@ function makeWorkspace(id, repo) {
   function needs(idea) {
     if (idea.stage === 'meeting' && idea.messages.at(-1)?.author === 'you') return { type: 'panel', at: idea.messages.at(-1).at };
     if (idea.stage === 'distilling' && idea.distill?.status === 'queued') return { type: 'distill', at: idea.distill.at };
-    if (canRefine(idea)) {
-      const r = idea.refinements.find((x) => x.status === 'pending');
+    if (idea.stage === 'distilled' && idea.prd?.status === 'queued') return { type: 'prd', at: idea.prd.at };
+    {
+      const r = idea.refinements.find((x) => x.status === 'pending' && canRefineDoc(idea, x.file));
       if (r) return { type: 'refine', at: r.at, refinement: r.id };
     }
     return null;
@@ -195,7 +248,8 @@ function makeWorkspace(id, repo) {
     const { idea, need } = pending[0];
     job = { id: shortId(), type: need.type, idea: idea.id, refinement: need.refinement, claimed_at: now(), claimed_ms: Date.now() };
     // Before the worker changes files you've seen, remember them as you last reviewed them (a refine can ripple)
-    rememberReviewed(need.type === 'refine' ? CONTEXT_FILES : need.type === 'distill' ? stepOf(idea.distill.step).files : []);
+    const touches = { refine: [...CONTEXT_FILES, ...prdNames()], distill: idea.distill && stepOf(idea.distill.step)?.files, prd: prdNames() };
+    rememberReviewed(touches[need.type] || []);
     broadcast('idea_changed', { idea: idea.id });
     broadcastPresence();
     return job;
@@ -209,7 +263,7 @@ function makeWorkspace(id, repo) {
     for (const f of files) {
       if (reviewed.has(f)) continue;
       try {
-        reviewed.set(f, fs.readFileSync(path.join(contextDir(), f), 'utf8'));
+        reviewed.set(f, fs.readFileSync(docFile(f), 'utf8'));
       } catch {} // a file that doesn't exist yet has nothing to compare against
     }
   }
@@ -247,12 +301,35 @@ function makeWorkspace(id, repo) {
         },
       };
     }
+    if (j.type === 'prd') {
+      const existing = prdNames();
+      j.before ??= existing; // to tell which PRDs an update added
+      // update: PRDs exist from an earlier pass, so edit them (and add or drop some) rather than start over
+      j.mode ??= existing.length ? 'update' : 'create';
+      return {
+        job: {
+          ...base,
+          mode: j.mode,
+          prds_dir: prdDir(),
+          context_dir: contextDir(),
+          context: CONTEXT_FILES.filter((f) => fs.existsSync(contextFile(idea.id, f))),
+          existing: existing.map((n) => path.basename(n)),
+          handed_off: existing.filter((n) => idea.handoffs?.[n]).map((n) => path.basename(n)),
+          context_changed: j.mode === 'update' && idea.prd.basis != null && idea.prd.basis !== contextHash(contextNow()),
+          guidance: idea.prd.guidance || null,
+          verdict: idea.verdict,
+          transcript: transcript(idea),
+        },
+      };
+    }
     const r = idea.refinements.find((x) => x.id === j.refinement);
     return {
       job: {
         ...base,
-        file: contextFile(idea.id, r.file),
+        file: docFile(r.file),
+        kind: isPrd(r.file) ? 'prd' : 'context',
         context_dir: contextDir(idea.id),
+        prds_dir: prdDir(),
         highlighted_text: r.quote || null,
         request: r.text,
       },
@@ -322,6 +399,13 @@ function makeWorkspace(id, repo) {
       const stale = j.mode === 'update' ? [] : step.files.filter((f) => (fs.statSync(contextFile(idea.id, f), { throwIfNoEntry: false })?.mtimeMs ?? 0) < j.claimed_ms - 1000);
       if (stale.length) throw httpError(409, `Write ${stale.join(', ')} for the ${step.label} step first (in ${contextDir(idea.id)})`);
       Object.assign(idea.distill, { status: 'review', note: reply || null, at: now() });
+    } else if (j.type === 'prd') {
+      const fresh = prdNames().filter((n) => fs.statSync(docFile(n)).mtimeMs >= j.claimed_ms - 1000);
+      if (j.mode === 'create' && !fresh.length) throw httpError(409, `Write the PRDs first (01-<slug>.md, … in ${prdDir()})`);
+      if (!prdNames().length) throw httpError(409, `No PRDs in ${prdDir()}. Write at least one.`);
+      // PRDs an update added are new to you: the UI marks them, since there is no earlier version to compare
+      const added = j.mode === 'update' ? prdNames().filter((n) => !(j.before || []).includes(n)) : [];
+      Object.assign(idea.prd, { status: 'review', note: reply || null, at: now(), basis: contextHash(contextNow()), updated: j.mode === 'update', added });
     } else {
       // A request the worker couldn't act on comes back as a question, which stays visible until dismissed
       const r = idea.refinements.find((x) => x.id === j.refinement);
@@ -332,6 +416,52 @@ function makeWorkspace(id, repo) {
     wake(); // more work may be waiting
   }
 
+  // ---------- Executions: a PRD built by a background Claude Code session, right on this checkout ----------
+  //
+  // One at a time per workspace: the changes land uncommitted on the current branch, and you test them, steer
+  // the session (claude attach <session>), commit, and mark the PRD complete before the next one can start.
+  //   building -> built (the session finished its turn) · blocked (it waits on you) · gone (the session was removed)
+  //   then complete (you marked it) or stopped (you ended it; its changes stay for you to keep or discard)
+  const execOpen = (e) => Boolean(e) && !['complete', 'stopped'].includes(e.status);
+  const openExecution = (idea) => Object.entries(idea?.executions || {}).find(([, e]) => execOpen(e)) || null;
+
+  function prdHeading(name) {
+    const head = fs.readFileSync(docFile(name), 'utf8').match(/^#\s+(.+)$/m)?.[1] || path.basename(name, '.md');
+    return head.replace(/^PRD\s+/i, '').trim();
+  }
+
+  function execPrompt(name) {
+    return `Implement PRD ${prdHeading(name)}.
+
+The PRD is .signals/${name}. Deliver its Outcome and meet every Acceptance check, within its Scope, Constraints and Decisions.
+Read .signals/context/ first (product.md, model.md, vocab.md, architecture.md) for the why and the shape, and use the terms in vocab.md exactly.
+
+Work directly in this checkout, on the current branch. Don't create a branch, commit, push or open a pull request: the human tests your change, steers you in this session, and commits it. Don't edit anything under .signals/.
+Make local decisions yourself. If the PRD or the context looks wrong, don't work around it: say so.
+End with a short summary: what changed, how to try it, and how to check each Acceptance item.`;
+  }
+
+  // Bring open executions in line with their sessions (the daemon polls `claude agents --json --all`)
+  async function syncExecutions(sessions) {
+    const idea = [...ideas.values()][0];
+    let moved = false;
+    for (const e of Object.values(idea?.executions || {})) {
+      if (!execOpen(e)) continue;
+      const s = sessions.find((x) => x.id === e.session);
+      const status = s ? SESSION_STATUS[s.state] || 'built' : 'gone';
+      if (status !== e.status) {
+        Object.assign(e, { status, at: now() });
+        moved = true;
+      }
+      // Keep the Claude session id: it outlives the background agent, so the run can be resumed later
+      if (s?.sessionId && s.sessionId !== e.session_id) {
+        e.session_id = s.sessionId;
+        moved = true;
+      }
+    }
+    if (moved) await save(idea);
+  }
+
   // ---------- Watch context files, so the UI shows the distill as it happens ----------
 
   const watchTimers = new Map();
@@ -340,7 +470,7 @@ function makeWorkspace(id, repo) {
     watcher = fs.watch(ROOT, { recursive: true }, (_type, filename) => {
       if (!filename) return;
       const parts = filename.split(path.sep);
-      if (parts[0] !== 'context' || parts.length !== 2 || !filename.endsWith('.md')) return;
+      if (!['context', PRD_DIR].includes(parts[0]) || parts.length !== 2 || !filename.endsWith('.md')) return;
       const iid = [...ideas.keys()][0];
       if (!iid) return;
       clearTimeout(watchTimers.get(iid));
@@ -368,15 +498,18 @@ function makeWorkspace(id, repo) {
     'GET /api/idea': async (q) => {
       const idea = getIdea(q.get('id'));
       const context = await contextFiles(idea.id);
+      const prds = await prdFiles();
       // For each file changed since you last reviewed it: the content you reviewed
-      const changes = Object.fromEntries(context.filter((f) => reviewed.has(f.name) && reviewed.get(f.name) !== f.content).map((f) => [f.name, reviewed.get(f.name)]));
-      return { ...idea, ...summary(idea), context, changes };
+      const changes = Object.fromEntries([...context, ...prds].filter((f) => reviewed.has(f.name) && reviewed.get(f.name) !== f.content).map((f) => [f.name, reviewed.get(f.name)]));
+      // The PRDs were cut from context that has changed since (a re-distill or a change request)
+      const prd_stale = Boolean(prds.length && idea.prd?.basis && ['review', 'done'].includes(idea.prd.status) && idea.prd.basis !== contextHash(contextNow()));
+      return { ...idea, ...summary(idea), context, prds, changes, prd_stale };
     },
 
     // You've looked at the changes: stop highlighting them (one file, or all)
     'POST /api/ideas/reviewed': async (_q, b) => {
       const idea = getIdea(b.id);
-      forgetReviewed(b.file ? [path.basename(contextFile(idea.id, b.file))] : CONTEXT_FILES);
+      forgetReviewed(b.file ? [docName(docFile(b.file))] : [...CONTEXT_FILES, ...prdNames()]);
       broadcast('idea_changed', { idea: idea.id });
       return { ok: true };
     },
@@ -503,10 +636,12 @@ function makeWorkspace(id, repo) {
     // Ask for a change to one context file, optionally anchored to a quote
     'POST /api/ideas/refine': async (_q, b) => {
       const idea = getIdea(b.id);
-      if (!canRefine(idea)) throw httpError(409, 'Context files can be changed while a step is under review, or once the idea is distilled.');
-      const abs = contextFile(idea.id, b.file);
-      if (!fs.existsSync(abs)) throw httpError(404, `No context file ${b.file}`);
-      const r = { id: shortId(), file: path.basename(abs), quote: String(b.quote || '').trim() || null, text: userText(b), status: 'pending', at: now() };
+      const abs = docFile(b.file);
+      const name = docName(abs);
+      if (isPrd(name) && prdLocked(idea, name)) throw httpError(409, 'This PRD has been executed: it stays as it is. Ask for a follow-up PRD instead.');
+      if (!canRefineDoc(idea, name)) throw httpError(409, isPrd(name) ? 'PRDs can be changed once they are written.' : 'Context files can be changed while a step is under review, or once the idea is distilled.');
+      if (!fs.existsSync(abs)) throw httpError(404, `No file ${b.file}`);
+      const r = { id: shortId(), file: name, quote: String(b.quote || '').trim() || null, text: userText(b), status: 'pending', at: now() };
       idea.refinements.push(r);
       await save(idea);
       wake();
@@ -523,13 +658,118 @@ function makeWorkspace(id, repo) {
       return { ok: true };
     },
 
+    // ---------- PRDs: the plan layer, cut from the distilled context ----------
+
+    // Write the PRDs, or update them (with guidance: what to change; after a context change: catch up)
+    'POST /api/prds/plan': async (_q, b) => {
+      const idea = getIdea(b.id);
+      if (idea.stage !== 'distilled') throw httpError(409, 'Approve the context first: PRDs are cut from the distilled context.');
+      if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
+      if (idea.prd?.status === 'queued') throw httpError(409, 'The PRDs are already queued.');
+      if (idea.refinements.some((r) => r.status === 'pending' && isPrd(r.file))) throw httpError(409, 'Changes you asked for are still being made. Try again once they land.');
+      clearRefinements(idea, prdNames());
+      idea.prd = { status: 'queued', guidance: String(b.guidance || '').trim() || null, note: null, at: now(), basis: idea.prd?.basis ?? null };
+      await save(idea);
+      broadcast('ideas_changed', {});
+      wake();
+      return summary(idea);
+    },
+
+    // Pass the PRD review gate: each PRD is now ready to hand off
+    'POST /api/prds/approve': async (_q, b) => {
+      const idea = getIdea(b.id);
+      if (!reviewingPrds(idea)) throw httpError(409, 'No PRDs are waiting for your review.');
+      if (job?.idea === idea.id || idea.refinements.some((r) => r.status === 'pending' && isPrd(r.file))) throw httpError(409, 'Changes you asked for are still being made. Approve once they land.');
+      clearRefinements(idea, prdNames());
+      forgetReviewed(prdNames());
+      Object.assign(idea.prd, { status: 'done', approved_at: now() });
+      delete idea.prd.added;
+      await save(idea);
+      broadcast('ideas_changed', {});
+      return summary(idea);
+    },
+
+    // Mark a PRD as handed to an executor. Handed-off PRDs aren't rewritten by later updates.
+    'POST /api/prds/handoff': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const name = docName(docFile(b.file));
+      if (!isPrd(name) || !fs.existsSync(docFile(name))) throw httpError(404, `No PRD ${b.file}`);
+      if (idea.prd?.status !== 'done') throw httpError(409, 'Approve the PRDs before handing one off.');
+      (idea.handoffs ||= {})[name] = true;
+      await save(idea);
+      return { ok: true };
+    },
+
+    // Build a PRD now, in a background Claude Code session on this checkout. One open execution per workspace.
+    'POST /api/prds/execute': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const name = docName(docFile(b.file));
+      if (!isPrd(name) || !fs.existsSync(docFile(name))) throw httpError(404, `No PRD ${b.file}`);
+      if (idea.prd?.status !== 'done') throw httpError(409, 'Approve the PRDs before executing one.');
+      if (idea.refinements.some((r) => r.status === 'pending' && r.file === name)) throw httpError(409, 'A change you asked for on this PRD is still being made.');
+      const open = openExecution(idea);
+      if (open) throw httpError(409, `${open[0]} is still open. Test it, commit, and mark it complete (or stop it) first.`);
+      if (idea.executions?.[name]?.status === 'complete') throw httpError(409, `${name} is already complete.`);
+      const label = `signals · PRD ${prdHeading(name)}`.slice(0, 60);
+      const { code, out } = await runClaude(['--bg', '-n', label, execPrompt(name)], repo);
+      const session = out.match(/backgrounded\s+·\s+([0-9a-f]+)/)?.[1];
+      if (code !== 0 || !session) throw httpError(502, `Couldn't start a background Claude session: ${out.trim().split('\n').at(-1) || `exit ${code}`}`);
+      const session_id = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0];
+      // Executing again keeps the earlier runs' sessions, newest first
+      const prev = idea.executions?.[name];
+      const runs = prev ? [{ session: prev.session, session_id: prev.session_id, status: prev.status, started_at: prev.started_at, at: prev.at }, ...(prev.runs || [])] : undefined;
+      (idea.executions ||= {})[name] = { session, ...(session_id && { session_id }), status: 'building', started_at: now(), at: now(), ...(runs && { runs }) };
+      (idea.handoffs ||= {})[name] = true; // an executor is building it: later PRD updates leave it alone
+      await save(idea);
+      return idea.executions[name];
+    },
+
+    // Close out an execution: complete (you tested and committed it) or stop (end the session)
+    'POST /api/prds/execution': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const name = docName(docFile(b.file));
+      const e = idea.executions?.[name];
+      // A stopped execution can still be completed: you may have finished it yourself
+      if (!execOpen(e) && !(e?.status === 'stopped' && b.action === 'complete')) throw httpError(409, `${name} has no open execution.`);
+      if (b.action === 'stop') {
+        if (['building', 'blocked', 'built'].includes(e.status)) await runClaude(['stop', e.session], repo);
+        Object.assign(e, { status: 'stopped', at: now() });
+      } else if (b.action === 'complete') {
+        Object.assign(e, { status: 'complete', at: now() });
+      } else throw httpError(400, 'action must be complete or stop');
+      await save(idea);
+      return e;
+    },
+
+    // Drop one PRD. Numbers aren't reused or shifted, so the others keep their names (and their handoffs).
+    'POST /api/prds/remove': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const name = docName(docFile(b.file));
+      if (!isPrd(name) || !fs.existsSync(docFile(name))) throw httpError(404, `No PRD ${b.file}`);
+      if (prdLocked(idea, name)) throw httpError(409, 'This PRD has been executed: it stays as it is.');
+      if (!['review', 'done'].includes(idea.prd?.status)) throw httpError(409, 'PRDs can be removed once they are written.');
+      if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
+      if (idea.refinements.some((r) => r.status === 'pending' && r.file === name)) throw httpError(409, 'A change you asked for on this PRD is still being made.');
+      await rm(docFile(name));
+      forgetReviewed([name]);
+      idea.refinements = idea.refinements.filter((r) => r.file !== name);
+      if (idea.handoffs) delete idea.handoffs[name];
+      if (idea.executions) delete idea.executions[name];
+      if (idea.prd.added) idea.prd.added = idea.prd.added.filter((n) => n !== name);
+      if (!prdNames().length) delete idea.prd; // nothing left: back to planning from scratch
+      await save(idea);
+      broadcast('ideas_changed', {});
+      return { ok: true };
+    },
+
     'POST /api/ideas/delete': async (_q, b) => {
       const idea = getIdea(b.id);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
       ideas.delete(idea.id);
-      forgetReviewed(CONTEXT_FILES);
+      forgetReviewed([...CONTEXT_FILES, ...prdNames()]);
       await rm(IDEA_FILE, { force: true });
       await rm(contextDir(), { recursive: true, force: true });
+      await rm(prdDir(), { recursive: true, force: true });
       broadcast('ideas_changed', {});
       return { ok: true };
     },
@@ -557,6 +797,8 @@ function makeWorkspace(id, repo) {
     root: ROOT,
     routes,
     presence,
+    executing: () => Boolean(openExecution([...ideas.values()][0])),
+    syncExecutions,
     idea: () => {
       const i = [...ideas.values()][0];
       return i ? summary(i) : null;
@@ -670,6 +912,22 @@ function findRoute(method, pathname) {
 }
 
 await loadRegistry();
+
+// Follow the background sessions building PRDs, only while some workspace has one open
+let syncing = false;
+setInterval(async () => {
+  const live = [...workspaces.values()].filter((w) => w.executing());
+  if (!live.length || syncing) return;
+  syncing = true;
+  try {
+    const { code, out } = await runClaude(['agents', '--json', '--all'], HOME);
+    if (code === 0) for (const w of live) await w.syncExecutions(JSON.parse(out));
+  } catch (err) {
+    console.warn('Session sync failed:', err.message);
+  } finally {
+    syncing = false;
+  }
+}, 5000);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
