@@ -3,13 +3,16 @@
 # A Claude Code session runs this in the background; the job arriving (script exiting) wakes it up.
 #
 #   poll.sh <workspace-id>        (the id printed by `signals serve <repo>`)
+#   poll.sh --hub                 the next job in any managed project (when `signals serve` printed `hub: yes`)
 #
 # Exit codes: 0 = printed a job, 1 = daemon unreachable (after 2 retries), 2 = usage.
 # SIGNALS_URL overrides the daemon address (default http://127.0.0.1:3461).
 set -u
 WS="${1:-}"
-[[ -n "$WS" ]] || { echo "Usage: poll.sh <workspace-id>" >&2; exit 2; }
+[[ -n "$WS" ]] || { echo "Usage: poll.sh <workspace-id> | poll.sh --hub" >&2; exit 2; }
 URL="${SIGNALS_URL:-http://127.0.0.1:3461}"
+NEXT="$URL/api/w/$WS/jobs/next"
+[[ "$WS" == "--hub" ]] && NEXT="$URL/api/hub/jobs/next"
 
 # If this script is stopped (session closed, TaskStop), take the in-flight request down with it, so the
 # daemon sees the hang-up and shows Claude offline. curl runs in the background + `wait` so traps fire at once.
@@ -22,7 +25,7 @@ trap 'exit 143' TERM INT HUP
 fails=0
 while true; do
   # The daemon holds each request up to 300s and answers as soon as work is waiting
-  curl -sf --max-time 320 "$URL/api/w/$WS/jobs/next?timeout=300" >"$OUT" &
+  curl -sf --max-time 320 "$NEXT?timeout=300" >"$OUT" &
   CURL_PID=$!
   if wait "$CURL_PID"; then ok=1; else ok=0; fi
   CURL_PID=

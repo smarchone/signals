@@ -1,4 +1,5 @@
 // Signals UI: meetings -> context -> PRDs -> exec. No build step; marked + DOMPurify are globals.
+// Vibe mode (picked with the first pitch): meetings -> context (business, product, model; no review gate) -> builds.
 // A repo has one living context and a series of meetings (M1, M2, …): the first sets the context up, each later one
 // amends it. Only the latest meeting is active: you talk in it, resume it, or start the next one.
 
@@ -13,6 +14,10 @@ const STEPS = [
 const GROUPS = STEPS.map((x) => ({ steps: [x.id], files: x.files }));
 const stepIndex = (id) => STEPS.findIndex((x) => x.id === id);
 const groupOf = (stepId) => GROUPS.findIndex((g) => g.steps.includes(stepId));
+const isVibe = (i) => i?.mode === 'vibe';
+// Vibe mode writes the first stage only (business, product, model), with no review gate
+const stepsOf = (i) => (isVibe(i) ? STEPS.slice(0, 1) : STEPS);
+const filesOf = (i) => stepsOf(i).flatMap((x) => x.files);
 const reviewing = (i) => i.stage === 'distilling' && i.distill?.status === 'review';
 const canRefine = (i) => i.stage === 'distilled' || reviewing(i);
 const canRedistill = (i) => !i.working && canRefine(i) && !i.refinements.some((r) => r.status === 'pending');
@@ -25,6 +30,8 @@ const canRefineDoc = (i, name) => name === LOG ? false : (isPrd(name) ? ['review
 // A PRD being executed, or complete, is what was built: it stays as it is (a stopped one can still change)
 const prdLocked = (i, name) => ['building', 'blocked', 'built', 'gone', 'complete'].includes(i.executions?.[name]?.status);
 const prdsPending = (i) => i.refinements.some((r) => r.status === 'pending' && isPrd(r.file));
+// Draft comments (in the daemon's memory until you send them), on one file or all
+const commentsOn = (i, file) => (i.comments || []).filter((t) => !file || t.file === file);
 // "# PRD 01: Walking skeleton" -> { num: '01', title: 'Walking skeleton' }
 function prdLabel(f) {
   const base = f.name.slice(5).replace(/\.md$/, '');
@@ -41,9 +48,20 @@ const S = {
   route: { ws: null, tab: 'meeting', file: null },
   presence: {},
   drafts: {}, // per-idea composer text
-  verdictOpen: false,
   verdictChoice: null,
   changePrds: { text: '', focus: [] }, // the Add or change PRDs form, kept across re-renders
+  modePick: {}, // dev mode, switched on for a repo's first pitch (vibe is the default)
+  hubDir: '~/signals_workspace',
+  newProject: '', // the New project name box
+  editingPitch: false, // the pitch: being edited (else shown rendered, like a context file)
+  ask: '', // the vibe ask box
+  activeThread: null, // the comment thread open in the margin ('new': the one being written)
+  newComment: null, // { file, quote }: a comment being written (quote null: on the whole file)
+  newCommentText: null,
+  replyText: {}, // thread id -> reply being written, kept across live re-renders
+  editMsg: null, // the draft message being edited, and its text so far
+  editMsgText: null,
+  showResolved: false, // the margin shows resolved comments instead of the open ones
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -57,7 +75,7 @@ async function api(method, route, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data });
   return data;
 }
 const wsApi = (method, route, body) => api(method, `/api/w/${encodeURIComponent(S.ws)}${route.replace(/^\/api/, "")}`, body);
@@ -69,13 +87,27 @@ function toast(text, ms = 2600) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => t.classList.remove('show'), ms);
 }
-const fail = (err) => toast(err.message || String(err));
+const fail = (err) => (err.data?.trust ? showTrust(err.data.trust) : toast(err.message || String(err)));
+
+// Claude Code won't start a session in a folder you haven't trusted. Say how, until it's dismissed.
+const shq = (p) => `'${String(p).replace(/'/g, `'\\''`)}'`;
+function showTrust(dir) {
+  document.querySelector('.trust-bar')?.remove();
+  const cmd = `cd ${shq(dir)} && claude`;
+  const bar = document.createElement('div');
+  bar.className = 'trust-bar';
+  bar.setAttribute('role', 'alert');
+  bar.innerHTML = `<span class="grow"><b>Claude Code doesn't trust this folder yet.</b> Run <code>${esc(cmd)}</code> once, accept the trust prompt, exit, then try again.</span>
+    <button class="btn sm" data-copy="${esc(cmd)}">Copy</button><button class="btn ghost sm" data-trust-close>✕</button>`;
+  document.body.append(bar);
+}
 
 // ---------- Routing: #/<repo>/meeting[/<M2|new>], #/<repo>/context[/<file>] or #/<repo>/prds[/<file>] ----------
 
 function parseRoute() {
-  const [ws, tab, file] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  const tabs = ['meeting', 'context', 'prds'];
+  const [ws, rawTab, file] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const tabs = ['meeting', 'context', 'prds', 'builds'];
+  const tab = rawTab === 'asks' ? 'builds' : rawTab; // links from before the rename
   return { ws: ws || null, tab: tabs.includes(tab) ? tab : 'meeting', file: file || null, canonical: tabs.includes(tab) };
 }
 function goIndex() {
@@ -98,7 +130,6 @@ async function onRoute() {
   S.route = r;
   S.ws = r.ws;
   if (wsChanged) {
-    S.verdictOpen = false;
     S.verdictChoice = null;
   }
   await loadIdeas();
@@ -109,8 +140,10 @@ async function onRoute() {
 // ---------- Data ----------
 
 async function loadWorkspaces() {
-  const { workspaces } = await api('GET', '/api/workspaces');
+  const { workspaces, hub_dir, hub } = await api('GET', '/api/workspaces');
   S.workspaces = workspaces;
+  if (hub_dir) S.hubDir = hub_dir;
+  S.hub = hub || { listening: false };
   for (const w of workspaces) S.presence[w.id] = w.presence;
 }
 async function loadIdeas() {
@@ -136,6 +169,7 @@ function ideaStatus(i) {
   if (i.working === 'distill') return { text: 'Writing context…', busy: true };
   if (i.working === 'refine') return { text: 'Making a change…', busy: true };
   if (i.working === 'prd') return { text: 'Writing PRDs…', busy: true };
+  if (i.asking) return { text: 'Building…', busy: true };
   if (reviewing(i)) return { text: 'Ready for your review', cls: 'you' };
   if (reviewingPrds(i)) return { text: 'PRDs ready for your review', cls: 'you' };
   if (i.waiting_on === 'you') return { text: 'Your move', cls: 'you' };
@@ -152,28 +186,64 @@ function workerState(wsId) {
   return p?.job ? ['busy', 'Claude is working'] : p?.listening ? ['on', 'Claude is connected'] : ['', "Claude isn't running"];
 }
 function renderIndex(main) {
-  const rows = S.workspaces
-    .map((w) => {
+  const row = (w) => {
       const st = ideaStatus(w.idea);
       const [cls, label] = workerState(w.id);
       return `<li class="ws-row">
         <button class="ws-card" data-repo="${esc(w.id)}">
           ${FOLDER_ICON}
-          <span class="ws-main"><span class="ws-card-name">${esc(w.name)}</span><span class="ws-card-path">${esc(w.path || w.repo)}</span></span>
-          <span class="ws-idea">${w.idea ? `${esc(w.idea.title)}${w.idea.meeting_count > 1 ? ` · ${esc(w.idea.meeting.id)}` : ''}` : ''}</span>
-          <span class="ws-card-status ${st?.cls || ''}">${esc(st?.text || (w.idea?.prd?.status === 'done' ? 'PRDs ready to hand off' : w.idea?.stage === 'distilled' ? 'Context ready' : ''))}</span>
+          <span class="ws-main"><span class="ws-card-name">${esc(w.name)}${isVibe(w.idea) ? '<span class="mode-tag">vibe</span>' : ''}</span><span class="ws-card-path">${esc(w.path || w.repo)}</span></span>
+          <span class="ws-card-status ${st?.cls || ''}">${esc(st?.text || (w.idea?.prd?.status === 'done' ? 'PRDs ready to hand off' : w.idea?.stage === 'distilled' ? (isVibe(w.idea) ? 'Ready to build' : 'Context ready') : ''))}</span>
           <span class="worker ${cls}" title="${label}"></span>
         </button>
         <button class="btn ghost sm icon more" data-menu="${esc(w.id)}" title="Workspace actions" aria-haspopup="menu">⋯</button>
       </li>`;
-    })
-    .join('');
+  };
+  const managed = S.workspaces.filter((w) => w.managed);
+  const repos = S.workspaces.filter((w) => !w.managed);
   main.innerHTML = `<header class="idea-head"><div class="ws-title">${BRAND}</div></header>
     <div class="body"><div class="index">
-      <h2>Workspaces</h2>
-      ${S.workspaces.length ? `<ul class="ws-list">${rows}</ul>` : ''}
+      <div class="index-h"><h2 title="Repos Signals created in ${esc(S.hubDir)}, served by one hub worker">Managed projects</h2>${hubBadge()}</div>
+      <div class="new-project">
+        <input id="new-project" data-keep="newproj" placeholder="Project name" aria-label="Project name" value="${esc(S.newProject)}" autocomplete="off" spellcheck="false" />
+        <button class="btn primary sm" id="create-project" ${S.newProject.trim() ? '' : 'disabled'}>New project</button>
+      </div>
+      <p class="np-where" id="np-where">${projectWhere()}</p>
+      ${managed.length ? `<ul class="ws-list">${managed.map(row).join('')}</ul>` : '<p class="index-hint">A fresh git repo per idea, created here and served by one hub worker. Vibe or dev, your pick on its first pitch.</p>'}
+      <h2 class="index-h2-gap">Workspaces</h2>
+      ${repos.length ? `<ul class="ws-list">${repos.map(row).join('')}</ul>` : ''}
       <p class="index-hint">Add a repo: run <code>signals serve</code> in it, or <code>/signals</code> in Claude Code there.</p>
     </div></div>`;
+}
+
+// Where a new project goes: a fresh git repo in the hub folder, named like the server names it
+const projectSlug = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+function projectWhere() {
+  const slug = projectSlug(S.newProject);
+  return `Lives in <code>${esc(S.hubDir)}/${slug ? `<b>${esc(slug)}</b>` : '…'}</code>`;
+}
+
+// The hub: one worker for every managed project, which you run in the hub folder
+function hubBadge() {
+  if (S.hub?.listening) return '<span class="hub-state"><span class="worker on"></span>Hub worker connected</span>';
+  return `<span class="hub-state"><span class="worker"></span>No hub worker: run <code>/signals</code> in <code>${esc(S.hubDir)}</code></span>`;
+}
+
+async function createProject() {
+  const name = S.newProject.trim();
+  if (!name) return;
+  const b = $('#create-project');
+  if (b) b.disabled = true;
+  try {
+    const w = await api('POST', '/api/workspaces/new', { name });
+    S.newProject = '';
+    await loadWorkspaces();
+    toast(`Created ${w.path}${w.git ? '' : ' (git init failed: no git?)'}`, 4000);
+    go({ ws: w.id, tab: 'meeting', file: null });
+  } catch (err) {
+    if (b) b.disabled = false;
+    fail(err);
+  }
 }
 
 const BRAND = '<a class="home" href="#/" title="All workspaces"><span class="logo" aria-hidden="true"></span>Signals</a>';
@@ -183,8 +253,10 @@ function workerBadge() {
   const p = S.presence[S.ws];
   const w = S.workspaces.find((x) => x.id === S.ws);
   if (p?.job) return `<span class="worker busy" title="Claude is ${{ panel: 'answering as the panel', distill: 'writing context', refine: 'making a change', prd: 'writing PRDs' }[p.job.type]}"></span>`;
-  if (p?.listening) return '<span class="worker on" title="Claude is connected and listening"></span>';
-  return `<span class="worker" title="Claude isn't running in ${esc(w?.name || 'this repo')}"></span><span class="worker-hint">Claude isn't running: run <code>/signals</code></span>`;
+  if (p?.listening) return `<span class="worker on" title="${p.hub ? 'The hub worker is connected and listening' : 'Claude is connected and listening'}"></span>`;
+  if (p?.worker) return `<span class="worker" title="A worker was started in the background"></span><span class="worker-hint">Worker starting… if it waits on a permission, <code>claude attach ${esc(p.worker.session)}</code></span><button class="btn ghost sm" data-copy="claude attach ${esc(p.worker.session)}">Copy</button>`;
+  if (w?.managed) return `<span class="worker" title="No hub worker"></span><span class="worker-hint">No hub worker: run <code>/signals</code> in <code>${esc(S.hubDir)}</code></span>`;
+  return `<span class="worker" title="Claude isn't running in ${esc(w?.name || 'this repo')}"></span><span class="worker-hint">Claude isn't running: run <code>/signals</code>, or</span><button class="btn sm" id="start-worker" title="Run /signals in a background Claude Code session in this repo">Start worker</button>`;
 }
 function renderPresence() {
   const el = $('.ws-title .worker-slot');
@@ -213,22 +285,23 @@ function keepFocus(fn) {
 
 function renderMain() {
   const main = $('#main');
-  if (!S.ws) return renderIndex(main);
-  if (!S.ideas.length) return renderStart(main);
+  if (!S.ws) return keepFocus(() => renderIndex(main)); // live updates re-render it while you type a name
+  if (!S.ideas.length) return keepFocus(() => renderStart(main)); // live updates re-render it while you write
   if (!S.idea) {
     main.innerHTML = '<div class="empty">That idea is gone.</div>';
     return;
   }
   if (S.route.tab === 'meeting' && S.route.file === 'new') {
-    main.innerHTML = renderIdeaHead() + renderSubhead() + meetingLayout(S.idea, startBody());
+    keepFocus(() => (main.innerHTML = renderIdeaHead() + renderSubhead() + meetingLayout(S.idea, startBody())));
     main.dataset.view = '';
-    $('#hunch').focus();
+    growPitch($('#hunch'));
+    if (!document.activeElement || document.activeElement === document.body) $('#hunch')?.focus();
     return;
   }
   const prevIdea = main.dataset.view;
   const prevTab = main.dataset.tab;
   const { nearBottom, top } = keepFocus(() => {
-    const view = { context: renderContext, prds: renderPrds }[S.route.tab] || renderMeeting;
+    const view = { context: renderContext, prds: renderPrds, builds: renderAsks }[S.route.tab] || renderMeeting;
     main.innerHTML = renderIdeaHead() + renderSubhead() + view();
     main.dataset.view = `${S.idea.id}:${S.route.file || ''}`;
     main.dataset.tab = S.route.tab;
@@ -244,8 +317,11 @@ function renderMain() {
     const doc = $('.ctx-doc');
     if (doc && sameView && top != null) doc.scrollTop = top;
     showChanges();
+    markComments();
+    document.querySelectorAll('.margin textarea').forEach(growArea);
+    layoutThreads();
     autosize($('#prd-guidance'));
-    const box = $('#change-prds-text');
+    const box = $('#change-prds-text') || $('#ask-text');
     if (box && document.activeElement !== box) box.focus();
   }
 }
@@ -260,30 +336,98 @@ function showChanges() {
     <button class="btn ghost sm" data-reviewed="${esc(art.dataset.file)}">Mark reviewed</button></div>`;
 }
 
+// The mode a repo's first pitch starts in: vibe, unless you switched dev mode on (for advanced users)
+function startMode() {
+  return S.modePick[S.ws] || 'vibe';
+}
+
 function renderStart(main) {
   const repo = S.workspaces.find((w) => w.id === S.ws)?.name || 'this repo';
   main.innerHTML = `<header class="idea-head"><div class="ws-title">${BRAND}<span class="crumb-sep">/</span>${FOLDER_ICON}<span class="ws-name">${esc(repo)}</span><span class="worker-slot">${workerBadge()}</span></div></header>${startBody()}`;
-  $('#hunch').focus();
+  growPitch($('#hunch'));
+  $('#hunch')?.focus();
 }
 
-// The pitch box: the first meeting's hunch, or the change the next meeting proposes
-function startBody() {
+// Dev mode: a small switch for advanced users, on the repo's first pitch only. Off is vibe.
+function modeSwitch() {
+  const dev = startMode() === 'dev';
+  return `<button class="mode-toggle ${dev ? 'on' : ''}" role="switch" aria-checked="${dev}" data-mode="${dev ? 'vibe' : 'dev'}" title="Advanced: a living context in reviewed stages, cut into PRDs, with more meetings later"><span class="knob"></span>Dev mode</button>`;
+}
+
+// The pitch: a markdown document that reads like a context file. It is the same pitch in both modes; vibe or dev
+// only changes the flow after the call. A later meeting (M2, …) pitches a change to the context instead.
+// Rendered once written; click it to edit the markdown in place; Esc, or clicking away, shows it rendered again.
+function pitchKind() {
+  if (S.idea) {
+    const next = `M${S.idea.meetings.length + 1}`;
+    return {
+      next,
+      file: 'pitch.md',
+      flow: 'Meeting → Context → PRDs → Build',
+      placeholder: "What's on your mind?", // no structure: the panel draws it out
+    };
+  }
+  return {
+    file: 'pitch.md',
+    flow: startMode() === 'vibe' ? 'Meeting → Context → Build' : 'Meeting → Context → PRDs → Build',
+    placeholder: "What's on your mind?", // no structure: the panel draws it out
+  };
+}
+const pitchEditing = () => S.editingPitch || !(S.drafts.__new || '').trim();
+function pitchDocBody() {
   const draft = S.drafts.__new || '';
-  const repo = S.workspaces.find((w) => w.id === S.ws)?.name || 'this repo';
-  const next = S.idea ? `M${S.idea.meetings.length + 1}` : null;
-  return `<div class="body"><div class="start">
-    <h2>${next ? `${next}: what changes in ${esc(repo)}?` : `What's the hunch for ${esc(repo)}?`}</h2>
-    <p>${next ? 'Pitch the feature or the rethink. The panel works from the current context and the meetings log, and pushes on what this changes. You make the call: commit amends the context.' : 'Pitch it raw. The panel will push on the vision, the loop and the hard constraints, quickly. You make the call.'}</p>
-    <textarea class="field" id="hunch" data-keep="hunch" placeholder="${next ? 'e.g. Teams: several people share one workspace and its context…' : 'e.g. A context workspace where humans vet ideas and agents build from the distilled mental model…'}">${esc(draft)}</textarea>
+  return pitchEditing()
+    ? `<textarea id="hunch" data-keep="hunch" spellcheck="true" placeholder="${esc(pitchKind().placeholder)}">${esc(draft)}</textarea>`
+    : `<article class="md pitch-rendered" id="pitch-rendered" tabindex="0" title="Click to edit">${md(draft)}</article>`;
+}
+function pitchDocMeta() {
+  const draft = (S.drafts.__new || '').trim();
+  const words = draft ? draft.split(/\s+/).length : 0;
+  return `${words} word${words === 1 ? '' : 's'}${draft ? ` · ${pitchEditing() ? 'Esc to see it rendered' : 'Click to edit'}` : ''}`;
+}
+// Grow the editor with its text, so editing keeps the page's shape
+function growPitch(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = `${ta.scrollHeight}px`;
+}
+// Switch between rendered and editing without re-rendering the page (a click on Start mustn't be lost)
+function setPitchEditing(on) {
+  S.editingPitch = on;
+  const body = $('#pitch-body');
+  if (!body) return;
+  body.innerHTML = pitchDocBody();
+  $('#word-count').textContent = pitchDocMeta();
+  const ta = $('#hunch');
+  if (ta && on) {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  growPitch(ta);
+}
+
+const PANELISTS = `<div class="panelists">
+  <span style="background:var(--ceo-soft);color:var(--ceo)">CEO</span>
+  <span style="background:var(--pm-soft);color:var(--pm)">PM</span>
+  <span style="background:var(--arch-soft);color:var(--arch)">Architect</span>
+</div>`;
+
+// The pitch page, the same in both modes: the mode (first meeting only), the document, then start
+function startBody() {
+  const k = pitchKind();
+  const name = S.workspaces.find((w) => w.id === S.ws)?.name || 'this';
+  return `<div class="body"><div class="start pitch">
+    <h2 class="pitch-title">Let's ${(S.idea ? isVibe(S.idea) : startMode() === 'vibe') ? 'vibe' : 'build'} <span>${esc(name)}</span></h2>
+    <div class="pitch-doc">
+      <div class="pitch-doc-head"><span class="editor-file">${k.file}</span><span class="pitch-meta" id="word-count">${pitchDocMeta()}</span></div>
+      <div id="pitch-body">${pitchDocBody()}</div>
+    </div>
     <div class="row">
-      <div class="panelists">
-        <span style="background:var(--ceo-soft);color:var(--ceo)">CEO</span>
-        <span style="background:var(--pm-soft);color:var(--pm)">PM</span>
-        <span style="background:var(--arch-soft);color:var(--arch)">Architect</span>
-      </div>
+      ${PANELISTS}
+      <div class="flow-hint">${k.flow}</div>
       <div class="grow"></div>
-      ${next ? '<button class="btn ghost" data-tab="meeting">Cancel</button>' : ''}
-      <button class="btn primary" id="start">Start ${next || 'the meeting'} ⌘↵</button>
+      ${k.next ? '<button class="btn ghost" data-tab="meeting">Cancel</button>' : modeSwitch()}
+      <button class="btn primary" id="start">Start ${k.next || 'the meeting'} ⌘↵</button>
     </div>
   </div></div>`;
 }
@@ -299,13 +443,14 @@ function fileState(i, f) {
 }
 
 // Header: the workspace, and the flow every change goes through (a legend, not a status)
-const FLOW = ['Meeting', 'Context', 'PRDs', 'Exec'];
+const FLOW = ['Meeting', 'Context', 'PRDs', 'Build'];
+const VIBE_FLOW = ['Meeting', 'Context', 'Build'];
 function renderIdeaHead() {
   const i = S.idea;
   const w = S.workspaces.find((x) => x.id === S.ws);
   return `<header class="idea-head">
     <div class="ws-title" title="${esc(w?.repo || '')}">${BRAND}<span class="crumb-sep">/</span>${FOLDER_ICON}<span class="ws-name">${esc(w?.name || '')}</span><span class="worker-slot">${workerBadge()}</span><span class="ws-path"><bdi>${esc(w?.path || w?.repo || '')}</bdi></span></div>
-    <div class="rail" title="How work flows through Signals">${FLOW.map((label, n) => `${n ? '<span class="sep"></span>' : ''}<span class="step">${label}</span>`).join('')}</div>
+    <div class="rail" title="${isVibe(i) ? 'Vibe mode: meetings shape the context, builds come from it' : 'How work flows through Signals'}">${isVibe(i) ? '<span class="mode-tag">vibe</span>' : ''}${(isVibe(i) ? VIBE_FLOW : FLOW).map((label, n) => `${n ? '<span class="sep"></span>' : ''}<span class="step">${label}</span>`).join('')}</div>
   </header>`;
 }
 
@@ -315,8 +460,18 @@ function renderSubhead() {
   const tab = S.route.tab;
   const hasCtx = i.stage === 'distilling' || i.stage === 'distilled' || i.context.length || i.log;
   const meetingMeta = i.meetings.length > 1 ? i.meetings.length : cur(i).stage === 'killed' ? 'killed' : cur(i).messages.filter((m) => m.author === 'panel').length;
-  const approved = CONTEXT_FILES.filter((f) => fileState(i, f) === 'done').length;
+  const approved = filesOf(i).filter((f) => fileState(i, f) === 'done').length;
   const hasPrds = i.stage === 'distilled' || i.prds.length;
+  if (isVibe(i)) {
+    const asks = i.asks?.length || 0;
+    return `<nav class="subhead">
+    <div class="tabs">
+      <button class="tab ${tab === 'meeting' ? 'active' : ''}" data-tab="meeting">Meeting<span class="count">${meetingMeta}</span></button>
+      <button class="tab ${tab === 'context' ? 'active' : ''}" data-tab="context" ${hasCtx ? '' : 'disabled title="Commit the idea to distill its context"'}>Context<span class="count">${hasCtx ? `${approved}/${filesOf(i).length}` : 'after the call'}</span></button>
+      <button class="tab ${tab === 'builds' ? 'active' : ''}" data-tab="builds" ${i.stage === 'distilled' ? '' : 'disabled title="Builds open once the context is written"'}>Builds<span class="count">${asks || (i.stage === 'distilled' ? 'go' : 'after context')}</span></button>
+    </div>
+  </nav>`;
+  }
   return `<nav class="subhead">
     <div class="tabs">
       <button class="tab ${tab === 'meeting' ? 'active' : ''}" data-tab="meeting">${i.meetings.length > 1 ? 'Meetings' : 'Meeting'}<span class="count">${meetingMeta}</span></button>
@@ -354,7 +509,8 @@ function workerHint() {
   const p = S.presence[S.ws];
   if (p?.listening || p?.job) return '';
   const w = S.workspaces.find((x) => x.id === S.ws);
-  return `<div class="notice">No worker is listening, so nothing will answer yet. Open Claude Code in <b>${esc(w?.name)}</b> and run <code>/signals</code>.</div>`;
+  if (w?.managed) return `<div class="notice">No hub worker is listening, so nothing will answer yet. Open Claude Code in <code>${esc(S.hubDir)}</code> and run <code>/signals</code>: one worker for every managed project.</div>`;
+  return `<div class="notice">No worker is listening, so nothing will answer yet. Start one from the header, or open Claude Code in <b>${esc(w?.name)}</b> and run <code>/signals</code>.</div>`;
 }
 
 function renderMeeting() {
@@ -369,7 +525,9 @@ function renderMeeting() {
     .map((m, n) =>
       (resumedAt.has(n) ? divider(resumedAt.get(n)) : '') +
       (m.author === 'you'
-        ? `<section class="turn turn-you"><span class="who">You</span><div class="said">${esc(m.text)}</div></section>`
+        ? n === 0
+          ? `<section class="turn turn-you"><span class="who">Pitch</span><div class="said md">${md(m.text)}</div></section>` // written in the pitch editor, as markdown
+          : `<section class="turn turn-you"><span class="who">You</span><div class="said">${esc(m.text)}</div></section>`
         : `<section class="turn turn-panel"><div class="msg-panel md">${md(m.text)}</div></section>`),
     )
     .join('') + (resumedAt.has(mt.messages.length) ? divider(resumedAt.get(mt.messages.length)) : '');
@@ -382,50 +540,45 @@ function renderMeeting() {
   const why = mt.verdict?.note ? `<span class="note">— ${esc(mt.verdict.note)}</span>` : '';
   if (!latest) {
     dock = `<div class="dock"><div class="dock-inner"><div class="banner ${mt.stage}">
-      <span class="grow"><b>${esc(mt.id)} · ${mt.stage === 'killed' ? 'Killed' : 'Committed'}</b> ${why}<br><small>An earlier meeting, read only. Only the latest one can be resumed; to revisit this, start a new meeting and say so.</small></span>
-      <button class="btn sm" data-meeting="${esc(cur(i).id)}">Go to ${esc(cur(i).id)} →</button></div></div></div>`;
+      <span class="grow"><b>${esc(mt.id)} · ${mt.stage === 'killed' ? 'Killed' : 'Committed'}</b> ${why}</span>
+      <button class="btn ghost sm" data-meeting="${esc(cur(i).id)}" title="Earlier meetings are read only">${esc(cur(i).id)} →</button></div></div></div>`;
   } else if (mt.stage === 'open') {
     const turns = mt.messages.filter((m) => m.author === 'panel').length;
+    const off = panelBusy || !turns ? `disabled title="${panelBusy ? 'Wait for the panel' : 'Hear the panel first'}"` : '';
     dock = `<div class="dock"><div class="dock-inner">
-      ${S.verdictOpen ? renderVerdict() : ''}
-      <div class="composer">
-        <textarea id="composer" data-keep="composer" rows="1" placeholder="${panelBusy ? 'The panel is answering' : 'Respond to the panel, or answer the open question'}">${esc(S.drafts[i.id] || '')}</textarea>
+      ${S.verdictChoice ? renderVerdict() : `<div class="composer">
+        <textarea id="composer" data-keep="composer" rows="1" placeholder="${panelBusy ? 'The panel is answering' : 'Reply to the panel'}">${esc(S.drafts[i.id] || '')}</textarea>
         <button class="btn primary" id="send" ${panelBusy ? 'disabled' : ''}>Send</button>
       </div>
       <div class="dock-meta">
         <span>↵ send · ⇧↵ new line</span>
-        ${S.verdictOpen ? '' : `<button class="btn ${turns >= 2 ? 'primary' : ''} sm" id="open-verdict" ${panelBusy || !turns ? 'disabled' : ''}>Make the call</button>`}
-      </div>
+        <span class="call-btns">
+          <button class="btn ghost sm call-kill" data-choice="kill" ${off}>Kill</button>
+          <button class="btn sm call-commit" data-choice="commit" ${off}>Commit</button>
+        </span>
+      </div>`}
     </div></div>`;
   } else {
     const busy = i.working || i.stage === 'distilling';
-    const off = busy ? `disabled title="${i.stage === 'distilling' ? 'Finish reviewing the context first' : 'Wait for the worker'}"` : '';
+    const off = busy ? `disabled title="${i.stage === 'distilling' ? (isVibe(i) ? 'Wait for the context to land' : 'Finish reviewing the context first') : 'Wait for the worker'}"` : '';
     const killed = mt.stage === 'killed';
     dock = `<div class="dock"><div class="dock-inner"><div class="banner ${mt.stage}">
-      <span class="grow"><b>${esc(mt.id)} · ${killed ? 'Killed' : 'Committed'}</b> ${why}
-        <br><small>${killed ? 'Logged with your reasoning. Resume it for a second hearing, or start the next meeting.' : 'Same feature, thinking moved on? Resume it: the new turns amend the context. A different change? Start a new meeting.'}</small></span>
-      <button class="btn sm" id="resume" ${off}>Resume ${esc(mt.id)}</button>
-      <button class="btn sm" data-meeting="new" ${off}>New meeting</button>
-      ${killed ? '' : `<button class="btn sm good" data-tab="${i.prd ? 'prds' : 'context'}">${i.prd ? 'Go to PRDs →' : 'Go to context →'}</button>`}</div></div></div>`;
+      <span class="grow"><b>${esc(mt.id)} · ${killed ? 'Killed' : 'Committed'}</b> ${why}</span>
+      <button class="btn ghost sm" id="resume" ${off || `title="${killed ? 'A second hearing' : 'Keep talking: the new turns amend the context'}"`}>Resume</button>
+      <button class="btn ghost sm" data-meeting="new" ${off || 'title="A different change"'}>New meeting</button>
+      ${killed ? '' : isVibe(i) ? `<button class="btn ghost sm" data-tab="${i.stage === 'distilled' ? 'builds' : 'context'}">${i.stage === 'distilled' ? 'Build →' : 'Context →'}</button>` : `<button class="btn ghost sm" data-tab="${i.prd ? 'prds' : 'context'}">${i.prd ? 'PRDs →' : 'Context →'}</button>`}</div></div></div>`;
   }
   return meetingLayout(i, `<div class="ctx-doc"><div class="transcript">${msgs}${tail}</div></div>${dock}`);
 }
 
+// The call, confirmed in one line: an optional why, then commit or kill
 function renderVerdict() {
   const c = S.verdictChoice;
-  return `<div class="verdict">
-    <h3>Your call</h3>
-    <p class="hint">The panel advises. You decide. Commit ${S.idea.context.length ? 'amends the context with what this meeting changed' : 'distills the meeting into context files'}, and logs the call once you approve it. Kill logs it with your reasoning.</p>
-    <div class="choices">
-      <button class="choice commit ${c === 'commit' ? 'sel' : ''}" data-choice="commit"><b>Commit</b><span>The shape is right. Distill the mental model.</span></button>
-      <button class="choice kill ${c === 'kill' ? 'sel' : ''}" data-choice="kill"><b>Kill</b><span>Not worth building. Keep the why.</span></button>
-    </div>
-    ${c ? `<textarea class="field" id="verdict-note" data-keep="vnote" rows="2" placeholder="${c === 'commit' ? 'Why this is worth building (one line)' : 'Why it dies (one line), for future you'}"></textarea>` : ''}
-    ${c === 'commit' ? `<textarea class="field" id="verdict-guidance" data-keep="vguide" rows="2" placeholder="Optional: anything the context should emphasise or assume"></textarea>` : ''}
-    <div class="row">
-      <button class="btn ghost sm" id="close-verdict">Keep talking</button>
-      ${c ? `<button class="btn ${c === 'commit' ? 'good' : 'bad'} sm" id="submit-verdict">${c === 'commit' ? 'Commit & distill' : 'Kill it'}</button>` : ''}
-    </div>
+  return `<div class="verdict ${c}">
+    <b>${c === 'commit' ? 'Commit' : 'Kill'}</b>
+    <input id="verdict-note" data-keep="vnote" autocomplete="off" placeholder="${c === 'commit' ? 'Why it\u2019s worth building (optional)' : 'Why not (optional)'}" />
+    <button class="btn ghost sm" id="close-verdict">Cancel</button>
+    <button class="btn sm ${c === 'commit' ? 'good' : 'bad'}" id="submit-verdict">${c === 'commit' ? 'Commit' : 'Kill'} ↵</button>
   </div>`;
 }
 
@@ -528,9 +681,9 @@ function renderGate(i) {
       ${i.distill.note ? `<div class="gate-note md">${DOMPurify.sanitize(marked.parse(i.distill.note, { gfm: true, breaks: true }))}</div>` : ''}
       ${logLine}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-step">Redo…</button>
-        <button class="btn good sm" id="approve-step" ${pend ? 'disabled title="Wait for your change requests to land"' : ''}>${next ? `Approve → ${esc(next.what.toLowerCase())}` : 'Approve'}</button>
+        <button class="btn good sm" id="approve-step" ${pend ? 'disabled title="Wait for your change requests to land"' : draftsIn(i) ? 'disabled title="Send or discard your draft comments first"' : ''}>${next ? `Approve → ${esc(next.what.toLowerCase())}` : 'Approve'}</button>
       </div>
     </div>`;
   }
@@ -571,11 +724,12 @@ function renderFileList(i, open) {
     const pend = i.refinements.filter((r) => r.file === f && r.status === 'pending').length;
     if (pend) st = 'working';
     const icon = STATE_ICON[st === 'written' ? 'done' : st] || STATE_ICON.todo;
-    const right = pend ? `<span class="pend">${pend} pending</span>` : i.changes?.[f] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
+    const drafts = draftsIn(i, f);
+    const right = pend ? `<span class="pend">${pend} pending</span>` : drafts ? `<span class="pend draft" title="Draft comments, not sent yet">${drafts} draft${drafts === 1 ? '' : 's'}</span>` : i.changes?.[f] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
     return `<button class="ctx-file ${f === open ? 'active' : ''}" ${has(f) ? `data-file="${esc(f)}"` : 'disabled'}>${icon}${esc(FILE_LABEL[f] || f)}${right}</button>`;
   };
   const live = (step) => (i.working === 'distill' && stepState(i, step.id) === 'working' ? writing(step) : null);
-  const files = STEPS.map((step) => step.files.map((f) => row(f, live(step))).join('')).join('<div class="ctx-sep" title="Your approval"></div>');
+  const files = stepsOf(i).map((step) => step.files.map((f) => row(f, live(step))).join('')).join('<div class="ctx-sep" title="Your approval"></div>');
   const log = i.log ? `<div class="ctx-sep"></div><button class="ctx-file ${open === LOG ? 'active' : ''}" data-file="${LOG}" title="Every call on this repo. The panel reads it with the context."><span class="st log">≡</span>Meetings log</button>` : '';
   return files + log;
 }
@@ -591,11 +745,13 @@ function renderContext() {
   } else if (!file) {
     doc = i.stage === 'distilled'
       ? `<div class="ctx-doc-inner"><div class="distill-wait"><h2>No current context</h2><p>The context folder is empty. Distill it again from the meeting.</p>${canRedistill(i) ? '<button class="btn primary" id="redistill">Distill from the meeting</button>' : ''}</div></div>`
-      : `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>The brief appears here first: product and business, the must-read. You review each step before the next one starts.</p></div></div>`;
+      : `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>${isVibe(i) ? 'The context appears here: business, product and model.' : 'The brief appears here first: product and business, the must-read. You review each step before the next one starts.'}</p></div></div>`;
   } else {
     // Only what needs attention: changes still being made, and questions the worker asked back
-    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending');
-    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked');
+    // A request from a comment thread shows in the margin instead
+    const inMargin = new Set(commentsOn(i).map((t) => t.id));
+    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending' && !inMargin.has(r.thread));
+    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked' && !inMargin.has(r.thread));
     const quote = (r) => esc((r.quote || r.text).replace(/\s+/g, ' ').slice(0, 80));
     const notes = [
       ...pending.map((r) => `<div class="note-line"><span class="dot busy"></span>${i.working === 'refine' ? 'Changing' : 'Queued'} · <span class="q">${quote(r)}</span></div>`),
@@ -604,16 +760,16 @@ function renderContext() {
     // The latest committed meeting has no PRDs yet: its work is next
     const lc = [...i.meetings].reverse().find((m) => m.stage === 'committed');
     const hasOwn = lc && Object.values(i.prd_origin || {}).includes(lc.id);
-    const next = i.stage === 'distilled' && lc && !hasOwn && (!i.prd || (i.prd.status === 'done' && i.prd_stale))
+    const next = isVibe(i)
+      ? i.stage === 'distilled' && !i.asks?.length ? '<div class="note-line next-line">The context is written. Next: say what to build.<button class="btn primary sm" data-tab="builds">Build →</button></div>' : ''
+      : i.stage === 'distilled' && lc && !hasOwn && (!i.prd || (i.prd.status === 'done' && i.prd_stale))
       ? `<div class="note-line next-line">Context approved. Next: cut ${i.prd ? `${esc(lc.id)}'s change` : 'the work'} into PRDs for your executor.<button class="btn primary sm" data-tab="prds">${i.prd ? 'Add its PRDs →' : 'Plan PRDs →'}</button></div>`
       : '';
-    doc = `<div class="ctx-doc-inner">
+    doc = withMargin(i, file, `
       ${gate}${next}
-      <div class="ctx-tools">${canRefine(i) ? '<button class="btn sm" id="ask-file">Ask for a change</button>' : ''}</div>
       ${notes ? `<div class="notes">${notes}</div>` : ''}
       <div id="changes-line"></div>
-      <article class="md" id="doc" data-file="${esc(file)}">${md(have.get(file).content)}</article>
-    </div>`;
+      <article class="md" id="doc" data-file="${esc(file)}">${md(have.get(file).content)}</article>`);
   }
   return `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderFileList(i, file)}</div><div class="ctx-doc">${doc}</div></div></div>`;
 }
@@ -657,7 +813,7 @@ function renderExecution(file, e) {
     case 'gone':
       return line('', `<span class="grow">The session is gone. Its changes are in your working tree.${resumeCmd}</span>`, resumeCopy + done + stop);
     case 'complete':
-      return line('', `<span class="grow">Complete.${e.summarized ? ' The executor’s summary is under <b>Execution summary</b> at the end.' : e.summarized === false ? ' No executor summary was found to add.' : ''}${resumeCmd}</span>`, resumeCopy);
+      return line('', `<span class="grow">Complete.${e.summarized ? ' The executor’s summary is under <b>Build summary</b> at the end.' : e.summarized === false ? ' No executor summary was found to add.' : ''}${resumeCmd}</span>`, resumeCopy);
     case 'stopped':
       return line('', `<span class="grow">Stopped. Its changes stay in your working tree for you to keep or discard. Finished it yourself? Mark it complete.${resumeCmd}</span>`, resumeCopy + done);
   }
@@ -714,7 +870,8 @@ function renderPrdList(i, open) {
     else if (p.status === 'review' && (!p.updated || fresh || i.changes?.[f.name] != null)) st = 'review'; // after an update, only what moved
     else if (p.status === 'queued' && !updating) st = writing ? (f.name === i.prds.at(-1)?.name ? 'working' : 'done') : 'queued';
     const icon = st === 'handed' ? '<span class="st handed" title="Handed off">↗</span>' : STATE_ICON[st];
-    const right = pend ? `<span class="pend">${pend} pending</span>` : fresh ? '<span class="pend">new</span>' : i.changes?.[f.name] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
+    const drafts = draftsIn(i, f.name);
+    const right = pend ? `<span class="pend">${pend} pending</span>` : drafts ? `<span class="pend draft" title="Draft comments, not sent yet">${drafts} draft${drafts === 1 ? '' : 's'}</span>` : fresh ? '<span class="pend">new</span>' : i.changes?.[f.name] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
     return `<button class="ctx-file ${f.name === open ? 'active' : ''}" data-prd="${esc(f.name.slice(5))}" title="${esc(f.name)}">${icon}${num ? `<span class="prd-num">${esc(num)}</span>` : ''}<span class="prd-title">${esc(title)}</span>${right}</button>`;
   });
   // Grouped by the meeting each PRD builds, once there is more than one
@@ -739,7 +896,7 @@ function renderPrdGate(i) {
   const p = i.prd;
   if (!p) return '';
   const note = p.note ? `<div class="gate-note md">${DOMPurify.sanitize(marked.parse(p.note, { gfm: true, breaks: true }))}</div>` : '';
-  const approve = `<button class="btn good sm" id="approve-prds" ${prdsPending(i) || i.working ? 'disabled title="Wait for your change requests to land"' : ''}>Approve → ready to hand off</button>`;
+  const approve = `<button class="btn good sm" id="approve-prds" ${prdsPending(i) || i.working ? 'disabled title="Wait for your change requests to land"' : commentsOn(i).some((t) => isPrd(t.file) && threadHasDraft(t)) ? 'disabled title="Send or discard your draft comments first"' : ''}>Approve → ready to hand off</button>`;
   if (p.status === 'review' && p.updated) {
     const added = (p.added || []).filter((n) => i.prds.some((f) => f.name === n)).length;
     const changed = i.prds.filter((f) => !isNewPrd(i, f.name) && i.changes?.[f.name] != null).length;
@@ -749,7 +906,7 @@ function renderPrdGate(i) {
       <p>Review what moved (marked in the list); the rest is as you approved it.</p>
       ${note}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-prds">Redo…</button>
         ${approve}
       </div>
@@ -761,7 +918,7 @@ function renderPrdGate(i) {
       <p>The work, cut into PRs in build order. Check the breakdown first (is 01 a thin slice of the whole loop?), then each PRD's acceptance checks.</p>
       ${note}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-prds">Redo…</button>
         ${approve}
       </div>
@@ -829,8 +986,10 @@ function renderPrds() {
     doc = `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>The PRDs appear here one by one, in build order.</p></div></div>`;
   } else {
     const f = i.prds.find((x) => x.name === file);
-    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending');
-    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked');
+    // A request from a comment thread shows in the margin instead
+    const inMargin = new Set(commentsOn(i).map((t) => t.id));
+    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending' && !inMargin.has(r.thread));
+    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked' && !inMargin.has(r.thread));
     const quote = (r) => esc((r.quote || r.text).replace(/\s+/g, ' ').slice(0, 80));
     const notes = [
       ...pending.map((r) => `<div class="note-line"><span class="dot busy"></span>${i.working === 'refine' ? 'Changing' : 'Queued'} · <span class="q">${quote(r)}</span></div>`),
@@ -843,84 +1002,487 @@ function renderPrds() {
     const execOff = open ? `disabled title="${esc(prdLabel(i.prds.find((x) => x.name === open) || { name: open, content: '' }).title)} is still open: mark it complete or stop it first"` : 'title="Build it now in a background Claude Code session, right on this checkout"';
     const tools = [
       canRefineDoc(i, file) && !i.working ? `<button class="btn ghost sm danger" data-remove-prd="${esc(file)}" title="Delete this PRD">Remove</button>` : '',
-      canRefineDoc(i, file) ? '<button class="btn sm" id="ask-file">Ask for a change</button>' : '',
       ready && !isExecOpen(ex) && ex?.status !== 'complete' ? `<button class="btn sm" data-handoff="${esc(file)}" title="Copy a prompt for your own coding agent and mark this PRD handed off">Copy prompt</button>` : '',
-      canExec ? `<button class="btn primary sm" data-execute="${esc(file)}" ${execOff}>${ex ? 'Execute again' : 'Execute'}</button>` : '',
+      canExec ? `<button class="btn primary sm" data-execute="${esc(file)}" ${execOff}>${ex ? 'Build again' : 'Build'}</button>` : '',
     ].join('');
-    doc = `<div class="ctx-doc-inner">
+    doc = withMargin(i, file, `
       ${gate}
-      <div class="ctx-tools">${tools}</div>
+      ${tools ? `<div class="ctx-tools">${tools}</div>` : ''}
       ${renderExecution(file, ex)}
       ${notes ? `<div class="notes">${notes}</div>` : ''}
       <div id="changes-line"></div>
-      <article class="md" id="doc" data-file="${esc(file)}">${md(f.content)}</article>
-    </div>`;
+      <article class="md" id="doc" data-file="${esc(file)}">${md(f.content)}</article>`);
   }
   return `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderPrdList(i, file)}</div><div class="ctx-doc">${doc}</div></div></div>`;
 }
 
-// ---------- Ask for a change (on a selection or the whole file) ----------
+// ---------- Builds (vibe mode; "asks" in the API): each one a background Claude Code session, from the context ----------
+
+const ASK_ICON = {
+  building: STATE_ICON.working,
+  blocked: STATE_ICON.review,
+  done: STATE_ICON.done,
+  gone: '<span class="st stale" title="The session is gone"></span>',
+  stopped: '<span class="st dead">■</span>',
+};
+const isAskOpen = (a) => ['building', 'blocked'].includes(a?.status);
+const openAskOf = (i) => (i.asks || []).find(isAskOpen) || null;
+
+function viewedAsk(i) {
+  if (S.route.file === 'new') return null;
+  return (i.asks || []).find((a) => a.id === S.route.file) || (S.route.file ? null : openAskOf(i));
+}
+
+function renderAskList(i, open) {
+  const rows = (i.asks || [])
+    .map((a) => `<button class="ctx-file ${a.id === open?.id ? 'active' : ''}" data-ask="${esc(a.id)}" title="${esc(a.text)}">${ASK_ICON[a.status] || STATE_ICON.todo}<span class="prd-num">${esc(a.id)}</span><span class="prd-title">${esc(a.text.split('\n')[0])}</span></button>`)
+    .reverse()
+    .join('');
+  return `<button class="ctx-file new-prd ${open ? '' : 'active'}" data-ask="new"><span class="st plus">+</span>New build</button>${rows ? `<div class="ctx-sep"></div>${rows}` : ''}`;
+}
+
+function renderAskStatus(a) {
+  const attach = `claude attach ${a.session}`;
+  const copy = (cmd) => `<button class="btn ghost sm" data-copy="${esc(cmd)}" title="Copy, then run it in a terminal in this repo">Copy</button>`;
+  const stop = `<button class="btn ghost sm danger" data-stop-ask="${esc(a.id)}" title="End the session. Its changes stay in your working tree.">Stop</button>`;
+  const resume = a.session_id ? `claude --resume ${a.session_id}` : '';
+  const line = (cls, body, btns = '') => `<div class="notes"><div class="note-line exec ${cls}">${body}<span class="exec-btns">${btns}</span></div></div>`;
+  switch (a.status) {
+    case 'building':
+      return line('', `<span class="dot busy"></span><span class="grow">Building in the background · <code>${esc(attach)}</code></span>`, copy(attach) + stop);
+    case 'blocked':
+      return line('ask', `<span class="grow"><b>It is waiting on you.</b> Answer it with <code>${esc(attach)}</code></span>`, copy(attach) + stop);
+    case 'done':
+      return line('', `<span class="grow">Built${resume ? ` · <code>${esc(resume)}</code>` : ''}</span>`, resume ? copy(resume) : '');
+    case 'gone':
+      return line('', `<span class="grow">The session is gone. Its changes are in your working tree.${resume ? ` <code>${esc(resume)}</code>` : ''}</span>`, resume ? copy(resume) : '');
+    case 'stopped':
+      return line('', `<span class="grow">Stopped. Its changes stay in your working tree to keep or discard.${resume ? ` <code>${esc(resume)}</code>` : ''}</span>`, resume ? copy(resume) : '');
+  }
+  return '';
+}
+
+function renderAskComposer(i) {
+  const busy = openAskOf(i);
+  const first = !i.asks?.length;
+  return `<div class="ctx-doc-inner"><div class="new-prd-form">
+    <div class="np-head"><span class="np-num np-icon">↯</span><div><h2>${first ? 'What should it build first?' : 'What next?'}</h2><p>Say what you want. A background Claude Code session builds it right in this repo, from the context, and commits it as a checkpoint.</p></div></div>
+    ${busy ? `<div class="note-line"><span class="dot busy"></span>${esc(busy.id)} is still building. The next build starts once it finishes.<button class="btn ghost sm" data-ask="${esc(busy.id)}">Watch it</button></div>` : ''}
+    <textarea class="field" id="ask-text" data-keep="ask" rows="5" placeholder="${first ? 'e.g. “Build the first version: the core loop, end to end”' : 'e.g. “Make the reveal feel snappier”, “add a share button”, “dark mode”'}">${esc(S.ask)}</textarea>
+    ${first ? '<div class="dep-list"><button class="dep" data-ask-fill="Build the first version: the whole core loop from the context, end to end, as simply as possible.">Build the whole thing from the context</button></div>' : ''}
+    <div class="np-row">
+      <span class="gate-hint">⌘↵ to build</span>
+      <div class="grow"></div>
+      <button class="btn primary" id="submit-ask" ${busy || !S.ask.trim() ? 'disabled' : ''}>Build it</button>
+    </div>
+  </div></div>`;
+}
+
+function renderAsks() {
+  const i = S.idea;
+  const a = viewedAsk(i);
+  let doc;
+  if (i.stage !== 'distilled') {
+    doc = '<div class="ctx-doc-inner"><div class="distill-wait"><h2>Context first</h2><p>Builds come from the context. It is being written now.</p></div></div>';
+  } else if (!a) {
+    doc = renderAskComposer(i);
+  } else {
+    doc = `<div class="ctx-doc-inner">
+      <div class="ask-head"><span class="prd-num">${esc(a.id)}</span><span class="ask-at">${esc((a.started_at || '').slice(0, 16).replace('T', ' '))}</span></div>
+      <div class="np-quote ask-text">${esc(a.text)}</div>
+      ${renderAskStatus(a)}
+      ${a.result ? `<article class="md" id="ask-result">${md(a.result)}</article>` : a.status === 'done' ? '<p class="muted">No summary was found in the session.</p>' : ''}
+    </div>`;
+  }
+  return `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderAskList(i, a)}</div><div class="ctx-doc">${doc}</div></div></div>`;
+}
+
+async function submitAsk() {
+  const text = S.ask.trim();
+  if (!text || openAskOf(S.idea)) return;
+  const b = $('#submit-ask');
+  if (b) b.disabled = true;
+  try {
+    const a = await wsApi('POST', '/api/asks', { id: S.idea.id, text });
+    S.ask = '';
+    toast(`${a.id} is building in the background.`);
+    go({ tab: 'builds', file: a.id });
+  } catch (err) {
+    if (b) b.disabled = false;
+    fail(err);
+  }
+}
+
+// ---------- Comments: threads in the right margin, drafted as you read, sent together ----------
+//
+// A comment and its replies are a thread, kept in the daemon's memory. What you write is a draft until you send
+// the batch; the worker then takes every thread with drafts in one job, and its answer (done, or a question)
+// lands back in the thread. A question stays open for your answer; a done thread resolves, leaving the margin
+// for the resolved list, so the margin only holds what still needs you.
+
+const draftsIn = (i, file) => commentsOn(i, file).reduce((n, t) => n + t.messages.filter((m) => m.draft).length, 0);
+const threadHasDraft = (t) => t.messages.some((m) => m.draft);
+const openThreads = (i, file) => commentsOn(i, file).filter((t) => !t.resolved);
+const resolvedThreads = (i, file) => commentsOn(i, file).filter((t) => t.resolved);
+const oneLine = (s) => esc(String(s).replace(/\s+/g, ' '));
+
+// The document with its comment margin, when the file can take comments or has any
+function withMargin(i, file, inner) {
+  const margin = renderMargin(i, file);
+  return margin
+    ? `<div class="ctx-doc-inner wide"><div class="sheet"><div class="page">${inner}</div>${margin}</div></div>`
+    : `<div class="ctx-doc-inner">${inner}</div>`;
+}
+
+function renderMargin(i, file) {
+  const can = canRefineDoc(i, file);
+  const mine = openThreads(i, file);
+  const done = resolvedThreads(i, file);
+  if (!can && !mine.length && !done.length) return '';
+  const resolvedView = S.showResolved && done.length > 0;
+  const total = draftsIn(i);
+  const files = new Set(commentsOn(i).filter(threadHasDraft).map((t) => t.file)).size;
+  const batch = total
+    ? `<div class="m-batch" title="${total} draft${total === 1 ? '' : 's'}${files > 1 ? ` across ${files} files` : ''}. The worker sees them when you send."><span class="m-n">${total} draft${total === 1 ? '' : 's'}${files > 1 ? ` · ${files} files` : ''}</span><button class="link" id="discard-comments">Discard</button><button class="m-send" id="send-comments" title="Send all drafts to the worker (⌘⇧↵)">Send</button></div>`
+    : '';
+  // Open and resolved are two views of the margin, never both at once
+  const views = done.length
+    ? `<span class="m-views"><button class="${resolvedView ? '' : 'on'}" data-margin-view="open">Open${mine.length ? ` ${mine.length}` : ''}</button><button class="${resolvedView ? 'on' : ''}" data-margin-view="resolved">Resolved ${done.length}</button></span>`
+    : '<span></span>';
+  // The head stays in view as you scroll: the views, the batch, and the resolved list
+  const top = (extra = '') => `<div class="m-top"><div class="margin-head">${views}${can && !resolvedView ? '<button class="link" id="ask-file" title="A comment on the whole file">+ File comment</button>' : ''}</div>${batch}${extra}</div>`;
+  if (resolvedView) return `<aside class="margin">${top(resolvedList(done))}</aside>`;
+  const fresh = S.newComment?.file === file ? newCommentCard(S.newComment) : '';
+  const cards = mine.map((t) => threadCard(i, t)).join('');
+  const empty = !fresh && !cards && can ? '<p class="m-empty">Select text to comment <kbd>⌘⌥M</kbd></p>' : '';
+  return `<aside class="margin">${top()}${empty}<div class="threads" id="threads">${fresh}${cards}</div></aside>`;
+}
+
+// Resolved threads: what you asked, and what the worker did; newest first
+function resolvedList(done) {
+  return `<div class="r-list">${done
+    .slice()
+    .reverse()
+    .map((t) => {
+      const last = t.messages.at(-1);
+      return `<div class="r-item">
+        <div class="r-quote">${t.quote ? oneLine(t.quote) : '<i>Whole file</i>'}</div>
+        <div class="r-ask">${oneLine(t.messages[0].text)}</div>
+        ${last.author === 'claude' ? `<div class="r-ans">↳ ${oneLine(last.text)}</div>` : ''}
+        <button class="link" data-thread-reopen="${esc(t.id)}">Reopen</button>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
+// One slim line: the text, and a small round button that sends it (↵ does too; ⇧↵ is a new line, Esc lets go)
+const SEND_ICON = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+function composerBox(attrs, text, placeholder, button) {
+  return `<div class="t-composer${(text || '').trim() ? ' has-text' : ''}"><textarea rows="1" ${attrs} placeholder="${placeholder}">${esc(text || '')}</textarea>${button}</div>`;
+}
+
+function newCommentCard(n) {
+  return `<div class="thread active is-draft" data-id="new">
+    <div class="t-quote ${n.quote ? '' : 'whole'}">${n.quote ? oneLine(n.quote) : 'Whole file'}</div>
+    ${composerBox('id="new-comment" data-keep="new-comment"', S.newCommentText, 'Comment…', `<button class="t-send" data-new-add title="Add (↵)">${SEND_ICON}</button>`)}
+  </div>`;
+}
+
+// One status per thread, only when it says something: queued or being changed, or the worker asks
+function threadChip(i, t) {
+  if (t.pending) return `<span class="chip working">${i.working === 'refine' ? 'Changing' : 'Queued'}</span>`;
+  if (!threadHasDraft(t) && t.messages.at(-1).question) return '<span class="chip ask">Question</span>';
+  return '';
+}
+
+function messageView(t, m, active) {
+  const who = m.author === 'claude' ? 'Worker' : 'You';
+  const editing = active && S.editMsg === m.id;
+  const body = editing
+    ? composerBox(`data-edit-msg="${esc(m.id)}" data-thread="${esc(t.id)}" data-keep="edit-${esc(m.id)}"`, S.editMsgText ?? m.text, 'Empty deletes it', `<button class="t-send" data-edit-save="${esc(m.id)}" data-thread="${esc(t.id)}" title="Save (↵) · Esc cancels">${SEND_ICON}</button>`)
+    : `<div class="t-body">${esc(m.text)}</div>`;
+  const edit = active && m.draft && !editing ? `<button class="link t-edit" data-edit-start="${esc(m.id)}">Edit</button>` : '';
+  return `<div class="t-msg${m.draft ? ' draft' : ''}"><div class="t-head"><span class="name">${who}</span>${m.draft ? '<span class="t-draft">draft</span>' : ''}${edit}</div>${body}</div>`;
+}
+
+function threadCard(i, t) {
+  const active = S.activeThread === t.id;
+  const msgs = active || t.messages.length < 3 ? t.messages : [t.messages[0], t.messages.at(-1)];
+  const more = !active && t.messages.length > 2 ? `<div class="t-more">${t.messages.length - 2} more</div>` : '';
+  let controls = '';
+  if (active) {
+    const reply = t.pending
+      ? '<div class="t-wait">With the worker. Reply once it answers.</div>'
+      : composerBox(`data-reply="${esc(t.id)}" data-keep="reply-${esc(t.id)}"`, S.replyText[t.id], t.messages.at(-1).question ? 'Answer…' : 'Reply…', `<button class="t-send" data-thread-reply="${esc(t.id)}" title="Reply (↵)">${SEND_ICON}</button>`);
+    const acts = [
+      threadHasDraft(t) ? `<button class="link" data-thread-discard="${esc(t.id)}">${t.messages[0].draft ? 'Delete' : 'Discard draft'}</button>` : '',
+      !threadHasDraft(t) && !t.pending ? `<button class="link" data-thread-resolve="${esc(t.id)}">✓ Resolve</button>` : '',
+    ].join('');
+    controls = reply + (acts ? `<div class="t-actions">${acts}</div>` : '');
+  }
+  const chip = threadChip(i, t);
+  const cls = ['thread', active && 'active', threadHasDraft(t) && 'is-draft', !t.quote && 'page-level'].filter(Boolean).join(' ');
+  return `<div class="${cls}" data-id="${esc(t.id)}">
+    ${chip ? `<div class="t-status">${chip}</div>` : ''}
+    <div class="t-quote ${t.quote ? '' : 'whole'}">${t.quote ? oneLine(t.quote) : 'Whole file'}</div>
+    ${msgs.map((m) => messageView(t, m, active)).join('')}${more}${controls}</div>`;
+}
+
+// The document's text with whitespace dropped, each character mapped to its text node and offset, so a quote
+// matches however the selection broke its lines
+function textIndex(el) {
+  const chars = [];
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    const t = n.nodeValue;
+    for (let k = 0; k < t.length; k++) if (!/\s/.test(t[k])) chars.push([n, k]);
+  }
+  return { text: chars.map(([n, k]) => n.nodeValue[k]).join(''), chars };
+}
+
+function markQuote(art, quote, id, nth = 0) {
+  const needle = quote.replace(/\s+/g, '');
+  const { text, chars } = textIndex(art);
+  let at = needle ? text.indexOf(needle) : -1;
+  for (let k = 0, next = at; k < nth && next > -1; k++) if ((next = text.indexOf(needle, next + 1)) > -1) at = next;
+  if (at < 0) return false;
+  const [sn, so] = chars[at];
+  const [en, eo] = chars[at + needle.length - 1];
+  // One mark per text node, so the highlight never breaks the document's structure
+  const nodes = [];
+  const walk = document.createTreeWalker(art, NodeFilter.SHOW_TEXT);
+  let on = false;
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (n === sn) on = true;
+    if (on) nodes.push(n);
+    if (n === en) break;
+  }
+  for (const n of nodes) {
+    const from = n === sn ? so : 0;
+    const to = n === en ? eo + 1 : n.nodeValue.length;
+    if (!n.nodeValue.slice(from, to).trim()) continue;
+    const r = document.createRange();
+    r.setStart(n, from);
+    r.setEnd(n, to);
+    const m = document.createElement('mark');
+    m.className = `cm-hl${S.activeThread === id ? ' active' : ''}`;
+    m.dataset.comment = id;
+    r.surroundContents(m);
+  }
+  return true;
+}
+
+// Highlight each open thread's quote in the document (the occurrence you selected), and the comment being written
+function markComments() {
+  const art = $('#doc');
+  if (!art || !S.idea) return;
+  const file = art.dataset.file;
+  if (S.newComment?.file === file && S.newComment.quote) markQuote(art, S.newComment.quote, 'new', S.newComment.nth);
+  for (const t of openThreads(S.idea, file)) {
+    const anchored = t.quote && markQuote(art, t.quote, t.id, t.nth);
+    document.querySelector(`.thread[data-id="${CSS.escape(t.id)}"]`)?.classList.toggle('orphan', Boolean(t.quote) && !anchored);
+  }
+}
+
+// Place each card beside its highlight, pushing overlapping cards apart; the active card wins its spot.
+// Whole-file and detached threads stack at the top. On a narrow pane the margin sits below the document.
+function layoutThreads() {
+  const sheet = $('.sheet');
+  const box = $('#threads');
+  if (!sheet || !box) return;
+  const narrow = $('.ctx-doc').clientWidth < 880;
+  sheet.classList.toggle('narrow', narrow);
+  const cards = [...box.querySelectorAll('.thread')];
+  if (narrow) {
+    box.style.height = '';
+    for (const c of cards) c.style.top = '';
+    return;
+  }
+  const base = box.getBoundingClientRect().top;
+  const items = cards.map((card) => {
+    const id = card.dataset.id;
+    const mark = $(`#doc mark[data-comment="${CSS.escape(id)}"]`);
+    return { card, id, want: mark ? mark.getBoundingClientRect().top - base : 0, h: card.offsetHeight, pinned: !mark };
+  });
+  items.sort((a, b) => (a.pinned === b.pinned ? a.want - b.want : a.pinned ? -1 : 1));
+  const GAP = 8;
+  let y = 0;
+  for (const it of items) {
+    it.top = it.pinned ? y : Math.max(it.want, y);
+    y = it.top + it.h + GAP;
+  }
+  const ai = items.findIndex((it) => it.id === S.activeThread && !it.pinned);
+  if (ai > -1) {
+    const floor = items.filter((it) => it.pinned).reduce((m, it) => Math.max(m, it.top + it.h + GAP), 0);
+    items[ai].top = Math.max(items[ai].want, floor);
+    for (let k = ai + 1; k < items.length; k++) items[k].top = Math.max(items[k].want, items[k - 1].top + items[k - 1].h + GAP);
+    for (let k = ai - 1; k >= 0 && !items[k].pinned; k--) items[k].top = Math.max(floor, Math.min(items[k].want, items[k + 1].top - items[k].h - GAP));
+  }
+  // However the active card moved things, no two cards overlap
+  for (let k = 1; k < items.length; k++) items[k].top = Math.max(items[k].top, items[k - 1].top + items[k - 1].h + GAP);
+  for (const it of items) it.card.style.top = `${it.top}px`;
+  box.style.height = `${items.reduce((m, it) => Math.max(m, it.top + it.h), 0)}px`;
+}
+window.addEventListener('resize', () => layoutThreads());
+
+function growArea(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+}
+
+function setActiveThread(id) {
+  if (S.activeThread === id) return;
+  if (id !== 'new' && S.newComment && !(S.newCommentText || '').trim()) S.newComment = null; // an empty new comment goes
+  S.activeThread = id;
+  S.editMsg = S.editMsgText = null;
+  if (id) S.showResolved = false;
+  renderMain();
+  // Opening a thread puts you in its reply box
+  if (id && id !== 'new') document.querySelector(`[data-reply="${CSS.escape(id)}"]`)?.focus();
+}
+
+function startComment(quote, nth = 0) {
+  closeAsk();
+  S.newComment = { file: $('#doc').dataset.file, quote, nth };
+  S.newCommentText = '';
+  S.activeThread = 'new';
+  S.showResolved = false;
+  window.getSelection()?.removeAllRanges();
+  renderMain();
+  $('#new-comment')?.focus();
+}
+
+function cancelComment() {
+  S.newComment = S.newCommentText = null;
+  if (S.activeThread === 'new') S.activeThread = null;
+  renderMain();
+}
+
+// Add the comment as a draft, then get out of the way: you keep reading
+async function addComment() {
+  const text = (S.newCommentText || '').trim();
+  if (!text || !S.newComment) return;
+  await wsApi('POST', '/api/ideas/comments', { id: S.idea.id, file: S.newComment.file, quote: S.newComment.quote, nth: S.newComment.nth, text });
+  S.newComment = S.newCommentText = null;
+  S.activeThread = null;
+  return refreshIdea();
+}
+
+async function addReply(tid) {
+  const text = (S.replyText[tid] || '').trim();
+  if (!text) return;
+  await wsApi('POST', '/api/ideas/comments/reply', { id: S.idea.id, comment: tid, text });
+  delete S.replyText[tid];
+  S.activeThread = null;
+  return refreshIdea();
+}
+
+async function saveEdit(tid, mid) {
+  const text = (S.editMsgText ?? '').trim();
+  await wsApi('POST', '/api/ideas/comments/edit', { id: S.idea.id, comment: tid, message: mid, text });
+  S.editMsg = S.editMsgText = null;
+  return refreshIdea();
+}
+
+async function sendComments() {
+  if (!draftsIn(S.idea)) return;
+  const r = await wsApi('POST', '/api/ideas/comments/send', { id: S.idea.id });
+  toast(`Sent ${r.sent} comment${r.sent === 1 ? '' : 's'} to the worker${r.dropped ? ` (${r.dropped} on files that can't change any more were dropped)` : ''}`);
+  return refreshIdea();
+}
 
 function closeAsk() {
-  document.querySelectorAll('.ask-btn, .ask-pop').forEach((e) => e.remove());
+  document.querySelectorAll('.ask-btn').forEach((e) => e.remove());
 }
 
-function openAsk(quote, rect) {
-  closeAsk();
-  const pop = document.createElement('div');
-  pop.className = 'ask-pop';
-  pop.innerHTML = `${quote ? `<div class="quote">${esc(quote)}</div>` : '<div class="quote">Whole file</div>'}
-    <textarea class="field" placeholder="What should change? e.g. “Rename this to Signal”, “too vague, make it a rule”"></textarea>
-    <div class="row"><button class="btn ghost sm" data-act="cancel">Cancel</button><button class="btn primary sm" data-act="send">Ask ⌘↵</button></div>`;
-  document.body.append(pop);
-  const x = Math.min(Math.max(12, rect.left), innerWidth - 372);
-  const y = rect.bottom + 8 + 200 > innerHeight ? rect.top - 8 - pop.offsetHeight : rect.bottom + 8;
-  Object.assign(pop.style, { left: `${x}px`, top: `${Math.max(12, y)}px` });
-  const ta = $('textarea', pop);
-  ta.focus();
-  const send = async () => {
-    const text = ta.value.trim();
-    if (!text) return;
-    try {
-      await wsApi('POST', '/api/ideas/refine', { id: S.idea.id, file: $('#doc').dataset.file, quote, text });
-      closeAsk();
-      window.getSelection()?.removeAllRanges();
-      toast('Change requested');
-    } catch (err) {
-      fail(err);
-    }
-  };
-  pop.addEventListener('click', (e) => {
-    const act = e.target.dataset.act;
-    if (act === 'cancel') closeAsk();
-    if (act === 'send') send();
-  });
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-    if (e.key === 'Escape') closeAsk();
-  });
+// The selection in a document you can comment on, if any
+function commentableSelection() {
+  const sel = window.getSelection();
+  const doc = $('#doc');
+  if (!doc || !S.idea || !canRefineDoc(S.idea, doc.dataset.file) || !sel || sel.isCollapsed || !doc.contains(sel.anchorNode)) return null;
+  const quote = sel.toString().trim();
+  if (!quote) return null;
+  // Which occurrence of the text you selected, so a repeated phrase highlights where you meant it
+  const range = sel.getRangeAt(0);
+  const before = document.createRange();
+  before.setStart(doc, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().replace(/\s+/g, '').length;
+  const needle = quote.replace(/\s+/g, '');
+  const text = textIndex(doc).text;
+  let nth = 0;
+  for (let at = text.indexOf(needle), k = 0; at > -1 && at <= start; at = text.indexOf(needle, at + 1), k++) nth = k;
+  return { quote: quote.slice(0, 8000), nth, rect: range.getBoundingClientRect() };
 }
 
+// Select text: a small Comment button appears under it (or press ⌘⌥M)
 document.addEventListener('mouseup', (e) => {
-  if (e.target.closest('.ask-pop, .ask-btn')) return;
+  if (e.target.closest('.ask-btn, .margin')) return;
   setTimeout(() => {
-    const sel = window.getSelection();
-    const doc = $('#doc');
-    if (!doc || !S.idea || !canRefineDoc(S.idea, doc.dataset.file) || !sel || sel.isCollapsed || !doc.contains(sel.anchorNode)) {
-      if (!$('.ask-pop')) closeAsk();
-      return;
-    }
-    const quote = sel.toString().trim();
-    if (!quote) return;
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const at = commentableSelection();
     closeAsk();
+    if (!at) return;
     const b = document.createElement('button');
-    b.className = 'btn primary sm ask-btn';
-    b.textContent = 'Ask for a change';
-    Object.assign(b.style, { left: `${rect.left}px`, top: `${rect.bottom + 6}px` });
-    b.onclick = () => openAsk(quote.slice(0, 600), rect);
+    b.className = 'ask-btn';
+    b.innerHTML = 'Comment <kbd>⌘⌥M</kbd>';
+    Object.assign(b.style, { left: `${at.rect.left + at.rect.width / 2}px`, top: `${at.rect.bottom + 6}px` });
+    b.onclick = () => startComment(at.quote, at.nth);
     document.body.append(b);
   }, 0);
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('button, textarea, a, .r-list')) return;
+  const hl = e.target.closest('mark.cm-hl[data-comment]');
+  if (hl && window.getSelection().isCollapsed) return setActiveThread(hl.dataset.comment);
+  const card = e.target.closest('.thread[data-id]');
+  if (card) return setActiveThread(card.dataset.id);
+  // A click anywhere else (not a selection) lets the open thread go; a new comment you've written stays
+  if (!window.getSelection().isCollapsed || !S.activeThread) return;
+  if (S.activeThread === 'new') return (S.newCommentText || '').trim() ? null : cancelComment();
+  if (e.target.closest('#doc, .margin, .ctx-doc')) setActiveThread(null);
+});
+
+document.addEventListener('input', (e) => {
+  const ta = e.target;
+  if (ta.id === 'new-comment') S.newCommentText = ta.value;
+  else if (ta.dataset?.reply) S.replyText[ta.dataset.reply] = ta.value;
+  else if (ta.dataset?.editMsg) S.editMsgText = ta.value;
+  else return;
+  ta.closest('.t-composer')?.classList.toggle('has-text', Boolean(ta.value.trim()));
+  growArea(ta);
+  layoutThreads();
+});
+
+document.addEventListener('keydown', (e) => {
+  const ta = e.target;
+  // ⌘⌥M: comment on the selection
+  if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyM') {
+    const at = commentableSelection();
+    if (at) return (e.preventDefault(), startComment(at.quote, at.nth));
+  }
+  // ⌘⇧↵: add what's in the box you're in, then send the batch
+  if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    const add = ta.id === 'new-comment' ? addComment() : ta.dataset?.reply ? addReply(ta.dataset.reply) : Promise.resolve();
+    return add.then(sendComments).catch(fail);
+  }
+  if (!ta.closest?.('.margin')) return;
+  // In a comment box: ↵ adds, ⇧↵ is a new line, Esc lets go
+  const enter = e.key === 'Enter' && !e.shiftKey && !e.isComposing;
+  if (ta.id === 'new-comment') {
+    if (enter) return (e.preventDefault(), addComment().catch(fail));
+    if (e.key === 'Escape') return cancelComment();
+  }
+  if (ta.dataset?.reply) {
+    if (enter) return (e.preventDefault(), addReply(ta.dataset.reply).catch(fail));
+    if (e.key === 'Escape') return setActiveThread(null);
+  }
+  if (ta.dataset?.editMsg) {
+    if (enter) return (e.preventDefault(), saveEdit(ta.dataset.thread, ta.dataset.editMsg).catch(fail));
+    if (e.key === 'Escape') return ((S.editMsg = S.editMsgText = null), renderMain());
+  }
 });
 
 // ---------- Actions ----------
@@ -932,10 +1494,10 @@ function autosize(ta) {
 }
 
 async function startMeeting() {
-  const text = $('#hunch').value.trim();
+  const text = (S.drafts.__new || '').trim();
   if (!text) return;
   try {
-    await wsApi('POST', '/api/ideas', { text });
+    await wsApi('POST', '/api/ideas', { text, mode: S.idea ? undefined : startMode() });
     S.drafts.__new = '';
     await loadWorkspaces();
     go({ tab: 'meeting', file: null });
@@ -959,11 +1521,9 @@ async function send() {
 
 async function submitVerdict() {
   const note = $('#verdict-note')?.value.trim();
-  const guidance = $('#verdict-guidance')?.value.trim();
   try {
-    await wsApi('POST', '/api/ideas/verdict', { id: S.idea.id, decision: S.verdictChoice, note, guidance });
+    await wsApi('POST', '/api/ideas/verdict', { id: S.idea.id, decision: S.verdictChoice, note });
     const committed = S.verdictChoice === 'commit';
-    S.verdictOpen = false;
     S.verdictChoice = null;
     await refreshIdea();
     if (committed) go({ tab: 'context', file: null });
@@ -993,10 +1553,11 @@ async function refreshIdea() {
   await loadIdea();
   // A change that just landed: say so once, instead of keeping a list of finished requests
   if (S.idea && S.idea.id === sameIdea) {
-    for (const r of S.idea.refinements) {
-      if (was.get(r.id) !== 'pending' || r.status === 'pending') continue;
-      toast(r.status === 'asked' ? `The worker has a question about ${r.file}` : `✓ ${r.file}: ${r.reply}`, 6000);
-    }
+    const landed = S.idea.refinements.filter((r) => was.get(r.id) === 'pending' && r.status !== 'pending');
+    const asked = landed.filter((r) => r.status === 'asked').length;
+    const done = landed.length - asked;
+    if (landed.length === 1) toast(asked ? `The worker has a question about ${landed[0].file}` : `✓ ${landed[0].file}: ${landed[0].reply}`, 6000);
+    else if (landed.length) toast(`✓ ${done} comment${done === 1 ? '' : 's'} done${asked ? ` · ${asked} question${asked === 1 ? '' : 's'} for you` : ''}`, 6000);
   }
   renderMain();
 }
@@ -1040,6 +1601,21 @@ document.addEventListener('click', async (e) => {
       return goIndex();
     }
     if (t.dataset.tab && !t.disabled) return go({ tab: t.dataset.tab, file: null });
+    if (t.dataset.mode) {
+      S.modePick[S.ws] = t.dataset.mode;
+      return renderMain();
+    }
+    if (t.dataset.ask) return go({ tab: 'builds', file: t.dataset.ask });
+    if (t.dataset.askFill) {
+      S.ask = t.dataset.askFill;
+      renderMain();
+      return $('#ask-text')?.focus();
+    }
+    if (t.dataset.stopAsk) {
+      if (!confirm(`Stop ${t.dataset.stopAsk}? Its changes stay in your working tree.`)) return;
+      await wsApi('POST', '/api/asks/stop', { id: S.idea.id, ask: t.dataset.stopAsk });
+      return refreshIdea();
+    }
     if (t.dataset.meeting && !t.disabled) return go({ tab: 'meeting', file: t.dataset.meeting === cur(S.idea).id ? null : t.dataset.meeting });
     if (t.dataset.file) return go({ tab: 'context', file: t.dataset.file });
     if (t.dataset.prd) return go({ tab: 'prds', file: t.dataset.prd });
@@ -1053,7 +1629,7 @@ document.addEventListener('click', async (e) => {
     if (t.dataset.execute) {
       const f = S.idea.prds.find((x) => x.name === t.dataset.execute);
       const { num, title } = prdLabel(f);
-      if (!confirm(`Execute PRD ${num ? `${num}: ` : ''}${title}?\n\nA background Claude Code session builds it right in this repo's working tree, on the current branch. You test it, commit, and mark it complete.`)) return;
+      if (!confirm(`Build PRD ${num ? `${num}: ` : ''}${title}?\n\nA background Claude Code session builds it right in this repo's working tree, on the current branch. You test it, commit, and mark it complete.`)) return;
       t.disabled = true;
       try {
         await wsApi('POST', '/api/prds/execute', { id: S.idea.id, file: f.name });
@@ -1070,6 +1646,7 @@ document.addEventListener('click', async (e) => {
       await wsApi('POST', '/api/prds/execution', { id: S.idea.id, file, action: t.dataset.exec });
       return refreshIdea();
     }
+    if (t.dataset.trustClose !== undefined) return t.closest('.trust-bar')?.remove();
     if (t.dataset.copy) {
       await copyText(t.dataset.copy);
       return toast('Copied. Run it in a terminal in this repo.');
@@ -1095,6 +1672,43 @@ document.addEventListener('click', async (e) => {
       await wsApi('POST', '/api/ideas/reviewed', { id: S.idea.id, file: t.dataset.reviewed });
       return refreshIdea();
     }
+    if (t.dataset.newAdd !== undefined) return addComment();
+    if (t.dataset.newCancel !== undefined) return cancelComment();
+    if (t.dataset.threadReply) return addReply(t.dataset.threadReply);
+    if (t.dataset.threadDiscard) {
+      const th = commentsOn(S.idea).find((x) => x.id === t.dataset.threadDiscard);
+      if (th?.messages[0].draft) S.activeThread = null;
+      await wsApi('POST', '/api/ideas/comments/discard', { id: S.idea.id, comment: t.dataset.threadDiscard });
+      return refreshIdea();
+    }
+    if (t.dataset.threadResolve) {
+      await wsApi('POST', '/api/ideas/comments/resolve', { id: S.idea.id, comment: t.dataset.threadResolve });
+      S.activeThread = null;
+      return refreshIdea();
+    }
+    if (t.dataset.marginView) {
+      S.showResolved = t.dataset.marginView === 'resolved';
+      return renderMain();
+    }
+    if (t.dataset.threadReopen) {
+      await wsApi('POST', '/api/ideas/comments/resolve', { id: S.idea.id, comment: t.dataset.threadReopen, resolved: false });
+      S.activeThread = t.dataset.threadReopen;
+      S.showResolved = false;
+      return refreshIdea();
+    }
+    if (t.dataset.editStart) {
+      S.editMsg = t.dataset.editStart;
+      S.editMsgText = null;
+      renderMain();
+      const ta = $('[data-edit-msg]');
+      ta?.focus();
+      return ta?.setSelectionRange(ta.value.length, ta.value.length);
+    }
+    if (t.dataset.editSave) return saveEdit(t.dataset.thread, t.dataset.editSave);
+    if (t.dataset.editCancel !== undefined) {
+      S.editMsg = S.editMsgText = null;
+      return renderMain();
+    }
     if (t.dataset.dismiss) {
       await wsApi('POST', '/api/ideas/refine/dismiss', { id: S.idea.id, refinement: t.dataset.dismiss });
       return refreshIdea();
@@ -1110,11 +1724,7 @@ document.addEventListener('click', async (e) => {
         return startMeeting();
       case 'send':
         return send();
-      case 'open-verdict':
-        S.verdictOpen = true;
-        return renderMain();
       case 'close-verdict':
-        S.verdictOpen = false;
         S.verdictChoice = null;
         return renderMain();
       case 'submit-verdict':
@@ -1148,7 +1758,16 @@ document.addEventListener('click', async (e) => {
         return refreshIdea();
       }
       case 'ask-file':
-        return openAsk(null, t.getBoundingClientRect());
+        return startComment(null);
+      case 'send-comments':
+        return sendComments();
+
+      case 'discard-comments': {
+        const n = draftsIn(S.idea);
+        if (!confirm(`Discard ${n} draft${n === 1 ? '' : 's'}?`)) return;
+        await wsApi('POST', '/api/ideas/comments/discard', { id: S.idea.id });
+        return refreshIdea();
+      }
       case 'plan-prds':
         await wsApi('POST', '/api/prds/plan', { id: S.idea.id, guidance: $('#prd-guidance')?.value.trim() });
         S.route.file = null;
@@ -1157,6 +1776,14 @@ document.addEventListener('click', async (e) => {
         return go({ tab: 'prds', file: null });
       case 'submit-change-prds':
         return submitChangePrds();
+      case 'submit-ask':
+        return submitAsk();
+      case 'create-project':
+        return createProject();
+      case 'start-worker':
+        t.disabled = true;
+        await wsApi('POST', '/api/worker/start', {});
+        return toast('Starting the worker in the background. It connects in a few seconds.', 4000);
       case 'update-prds':
         await wsApi('POST', '/api/prds/plan', { id: S.idea.id, guidance: null });
         return refreshIdea();
@@ -1172,6 +1799,7 @@ document.addEventListener('click', async (e) => {
         return refreshIdea();
       case 'delete-idea':
         if (!confirm(`Delete “${S.idea.title}” and its context files? This can't be undone.`)) return;
+        S.drafts.__new = '';
         await wsApi('POST', '/api/ideas/delete', { id: S.idea.id });
         await loadWorkspaces();
         return go({ tab: 'meeting', file: null });
@@ -1181,12 +1809,43 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#pitch-rendered') && !e.target.closest('a') && !window.getSelection()?.toString()) setPitchEditing(true);
+});
+document.addEventListener('focusout', (e) => {
+  if (e.target.id !== 'hunch' || !$('#pitch-body')) return;
+  // A live re-render puts focus straight back on the new editor: only a real move away shows it rendered
+  setTimeout(() => {
+    if (document.activeElement?.id !== 'hunch' && (S.drafts.__new || '').trim() && $('#pitch-body')) setPitchEditing(false);
+  }, 0);
+});
+
 document.addEventListener('input', (e) => {
   if (e.target.id === 'composer') {
     S.drafts[S.idea.id] = e.target.value;
     autosize(e.target);
   }
-  if (e.target.id === 'hunch') S.drafts.__new = e.target.value;
+  if (e.target.id === 'hunch') {
+    S.drafts.__new = e.target.value;
+    const wc = $('#word-count');
+    if (wc) {
+      S.editingPitch = true; // typing keeps it in the editor, even from empty
+      wc.textContent = pitchDocMeta();
+      growPitch(e.target);
+    }
+  }
+  if (e.target.id === 'new-project') {
+    S.newProject = e.target.value;
+    const b = $('#create-project');
+    if (b) b.disabled = !projectSlug(e.target.value);
+    const where = $('#np-where');
+    if (where) where.innerHTML = projectWhere();
+  }
+  if (e.target.id === 'ask-text') {
+    S.ask = e.target.value;
+    const b = $('#submit-ask');
+    if (b) b.disabled = !e.target.value.trim() || Boolean(openAskOf(S.idea));
+  }
   if (e.target.id === 'change-prds-text') {
     S.changePrds.text = e.target.value;
     const b = $('#submit-change-prds');
@@ -1200,7 +1859,25 @@ document.addEventListener('keydown', (e) => {
     if (!$('#send').disabled) send();
   }
   if (e.target.id === 'hunch' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) startMeeting();
+  if (e.target.id === 'verdict-note' && e.key === 'Enter' && !e.isComposing) submitVerdict();
+  if (e.target.id === 'verdict-note' && e.key === 'Escape') {
+    S.verdictChoice = null;
+    renderMain();
+  }
   if (e.target.id === 'change-prds-text' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitChangePrds();
+  if (e.target.id === 'ask-text' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitAsk();
+  if (e.target.id === 'new-project' && e.key === 'Enter') createProject();
+  if (e.target.id === 'hunch' && e.key === 'Escape' && $('#pitch-body') && e.target.value.trim()) setPitchEditing(false);
+  if (e.target.id === 'pitch-rendered' && e.key === 'Enter') {
+    e.preventDefault();
+    setPitchEditing(true);
+  }
+  // The pitch editor: Tab indents instead of leaving the field
+  if (e.target.id === 'hunch' && e.key === 'Tab' && !e.shiftKey && $('#pitch-body')) {
+    e.preventDefault();
+    e.target.setRangeText('  ', e.target.selectionStart, e.target.selectionEnd, 'end');
+    S.drafts.__new = e.target.value;
+  }
   if (e.target.id === 'change-prds-text' && e.key === 'Escape') go({ tab: 'prds', file: null });
   if (e.key === 'Escape') (closeAsk(), closeMenu());
 });
@@ -1218,6 +1895,7 @@ function listen() {
   es.addEventListener('presence', (e) => {
     const p = JSON.parse(e.data);
     S.presence[p.workspace] = p;
+    if (!S.ws && p.hub) schedule(async () => (await loadWorkspaces(), S.ws ? null : renderMain())); // the hub badge on the index
     if (p.workspace === S.ws) {
       renderPresence();
       if (S.idea && !document.activeElement?.closest?.('.verdict')) schedule(refreshIdea);

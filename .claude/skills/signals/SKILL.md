@@ -18,6 +18,18 @@ The daemon serves every registered repo and hands out **jobs**, one at a time pe
 2. The poller is `scripts/poll.sh` in this skill's directory: `<base>/scripts/poll.sh <workspace>`. It waits
    for the next job, prints it as JSON and exits.
 
+### Hub mode
+
+If `signals serve` printed `hub: yes`, this session runs in the **hub folder** and is the **hub**: one worker
+for every **managed project** in it (each a repo in a subfolder, Signals created it, vibe or dev mode). Poll with `<base>/scripts/poll.sh --hub`.
+Every job carries its `workspace` (complete it at `/api/w/<workspace>/jobs/complete`) and its `repo` (the
+folder it belongs to; all paths in the job are absolute).
+
+Jobs from different repos arrive interleaved. Keep them apart: a job only ever uses its own repo's files and
+transcript. Whatever you read for one repo says nothing about another, so when a job's `workspace` differs from
+the last one you handled, read its context afresh instead of relying on memory. Never write outside the job's
+`repo`. The user clears this session's context themselves when it grows.
+
 ## Loop
 
 1. Start the poller with Bash and `run_in_background: true`. Stay idle and silent until it exits.
@@ -27,7 +39,11 @@ The daemon serves every registered repo and hands out **jobs**, one at a time pe
 
 ## Jobs
 
-Every job has `id`, `type` and `idea: {id, title}`. Finish it with one call (build the JSON with `jq -n` or
+Every job has `id`, `type`, `workspace`, `repo` and `idea: {id, title}`. A job with `vibe: true` belongs to a **vibe mode** repo,
+for building fast rather than steering a long project. Meetings work as in dev (a pitch, later meetings that
+change the context, resume), but committing writes only the first stage (business, product, model: no design
+stage, no review gate, no PRDs). The user then starts builds, background sessions that work straight from those
+files, and can ask for changes to them. Finish a job with one call (build the JSON with `jq -n` or
 escape it carefully):
 
 ```bash
@@ -50,6 +66,9 @@ up; later ones propose a change to it; `resumed` is set when the user reopened i
   them when the meeting starts and again whenever `context_version` changes; between turns, rely on what you
   read. Treat everything in the context as planned or being built, unless the user says otherwise.
 - this meeting's `transcript`.
+
+In vibe mode, follow the vibe section of `references/panel.md`: nothing reviews the context before builds work
+from it, so the meeting is the guardrail.
 
 Never read older meetings' transcripts, and don't open PRDs in `prds_dir` unless the user names one: pull in
 just that one.
@@ -92,6 +111,11 @@ narrated.
 
 The design stage sends only `context`.
 
+With `vibe: true` there is only the first stage (`step` is `brief`, `step_number` is `1 of 1`), and nobody
+reviews it before building: the files are what every build works from. Follow the vibe notes in
+`references/distill/brief.md`. Send the `log` as usual: with no gate, the call is logged as soon as you
+complete the job, and later meetings read it.
+
 ### `prd`
 
 Cut the approved context into PRDs in `prds_dir`, following `references/prd.md`. Inputs: the `context` files
@@ -111,11 +135,20 @@ one cut the user should check. On update: what changed and where, and any overla
 
 ### `refine`
 
-Change `file` as `request` asks; `highlighted_text` (may be null) is the passage they selected. `kind` is
-`context` or `prd`. Make a focused edit and keep the file's spec (`references/distill/` or
-`references/prd.md`). A context change may ripple to other files in `context_dir` (a renamed term); don't
-edit PRDs for it (the UI flags them for an update). A PRD change stays in `prds_dir`: if it needs the context
-to change, ask instead. `text`: one or two sentences on what changed. If the request is ambiguous, don't
-edit: ask one concrete question as `text` and add `"question": true`.
+The user reviewed context files or PRDs and sent a batch of comments. `requests` lists them, each with `id`,
+`file`, `kind` (`context` or `prd`), `request`, and `highlighted_text` (the passage they selected; null for a
+comment on the whole file). Read them all before editing: together they are one review, so make one coherent
+pass per file rather than a patch per comment, and resolve comments that touch the same passage together. Keep
+each file's spec (`references/distill/` or `references/prd.md`) and make focused edits. A context change may
+ripple to other files in `context_dir` (a renamed term); don't edit PRDs for it (the UI flags them for an
+update). A PRD change stays in `prds_dir`: if it needs the context to change, ask instead.
+
+A request may carry `thread`: the conversation on that comment so far (the user's earlier comments and your
+answers). Its `request` is the user's reply: read it in that light (often an answer to your question).
+
+`text`: one or two sentences on what changed across the batch. Each answer lands in its comment's thread, so
+also send `"replies": {"<request id>": "<one line on what you did for it>"}`. If a comment is ambiguous, skip
+it, act on the rest, and ask one concrete question about it in `"questions": {"<request id>": "<question>"}`
+instead. If you can act on none of them, send `questions` for each and say so in `text`.
 
 Print at most one line per job.

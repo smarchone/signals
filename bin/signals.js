@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// signals serve [repo]   start the daemon if it isn't running, then register <repo> (default: current folder)
+// signals serve [repo]   start the daemon if it isn't running, then register <repo> (default: current folder).
+//                        In the hub folder (~/signals_workspace) it registers nothing: a worker there is the hub.
 // signals status         list the workspaces the daemon serves
 // signals remove [repo]  unregister <repo> (default: current folder) or a workspace id; its .signals/ stays on disk
 // signals stop           stop the daemon
@@ -73,8 +74,14 @@ try {
     const started = !(await running());
     if (started) await startDaemon();
     const w = await call('POST', '/api/workspaces', { repo });
-    console.log(`${started ? 'Started the signals daemon. ' : ''}Serving ${w.root}`);
-    console.log(`workspace: ${w.id}`);
+    if (w.hub) {
+      // The hub folder: one worker here serves every managed project in it
+      console.log(`${started ? 'Started the signals daemon. ' : ''}This is the hub folder (${w.root}): a worker here is the hub for every managed project in it.`);
+      console.log('hub: yes');
+    } else {
+      console.log(`${started ? 'Started the signals daemon. ' : ''}Serving ${w.root}`);
+      console.log(`workspace: ${w.id}`);
+    }
     console.log(`url: ${w.url}`);
   } else if (cmd === 'status') {
     if (!(await running())) {
