@@ -102,8 +102,9 @@ Signals is a local daemon that runs the step before the code.
                              └───────────────────────────┘           └──────────────────────┘
 ```
 
-One daemon serves all your registered repos. Each repo's Claude Code session runs `/signals` and waits for
-jobs: it speaks as the panel, distills the context, and cuts it into PRDs.
+One daemon serves all your registered repos. A Claude Code session runs `/signals` and waits for jobs: it
+speaks as the panel, distills the context, and cuts it into PRDs. Projects created from the UI share one
+session, the hub worker in `~/signals_workspace`; an existing repo you register gets its own.
 
 ## Quick start
 
@@ -115,18 +116,27 @@ npm link                         # install the signals CLI
 npx skills add . -g              # install the /signals skill
 ```
 
-Then, in your repo:
+Then start the **hub worker**. New projects live in the hub folder (`~/signals_workspace`, or
+`$SIGNALS_HUB_DIR`), one git repo each, and a single Claude Code session there serves all of them:
 
 ```bash
+mkdir -p ~/signals_workspace && cd ~/signals_workspace
 claude
-> /signals                       # starts the daemon and registers this repo
+> /signals                       # starts the daemon; this session is the hub worker
 ```
 
-To register another repo: `signals serve /path/to/repo`.
+Keep that session open. The UI shows **Hub worker connected** once it is listening. If nothing is
+listening, nothing answers your pitch.
 
-1. Open **http://127.0.0.1:3461** and pitch your idea.
-2. Commit or kill it. If you commit, review the context, then the PRDs.
-3. Click **Build** on a PRD, review the result, and move to the next.
+1. Open **http://127.0.0.1:3461**, create a **New project**, and pitch your idea.
+2. Commit or kill it. If you commit, the panel writes the context (business, product, model).
+3. Open **Build**, say what to build, review the result, and ask for the next.
+
+Projects start in **vibe mode**: no review gates and no PRDs, so builds come straight from the context.
+Switch on **Dev mode** at the first pitch for the full flow: reviewed context stages, PRDs, one build per PRD.
+
+**Existing repo?** Run `/signals` in that repo instead (or `signals serve /path/to/repo`). An existing repo
+gets its own worker, not the hub.
 
 You steer the *why* and the *shape*; agents handle the rest.
 
