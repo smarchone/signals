@@ -11,7 +11,7 @@ Signals distills the context and keeps it current; you only approve what changed
 workflow you already use.
 
 ```
- meeting ─────────▶ context ──────────────▶ PRDs ──────────▶ execute
+ meeting ─────────▶ context ──────────────▶ PRDs ──────────▶ build
  CEO · PM ·         business · product ·     3–7, in          one PRD per PR,
  Architect          model · vocab · arch     build order      Claude Code or your agent
 ```
@@ -63,7 +63,7 @@ To register another repo: `signals serve /path/to/repo`.
 
 1. Open **http://127.0.0.1:3461** and pitch your idea.
 2. Commit or kill it. If you commit, review the context, then the PRDs.
-3. Click **Execute** on a PRD, review the result, and move to the next.
+3. Click **Build** on a PRD, review the result, and move to the next.
 
 You steer the *why* and the *shape*; agents handle the rest.
 

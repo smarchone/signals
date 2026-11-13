@@ -34,3 +34,13 @@ is…"). No glossary here: `vocab.md` pins the terms down later. Once a term is 
    through the abstractions.
 
 Nothing deeper: the human confirms this shape before the design builds on it.
+
+## Vibe mode (`vibe: true`)
+
+These three files are the whole context, and no one reviews them before builds work from them. A later
+meeting updates them (`mode: "update"`) like any other. Write the same three files
+for a coding agent building a first version: keep `business.md` short (why it's worth building, for whom),
+make `product.md`'s core loop and the moment concrete enough to build from, and let `model.md` name the
+abstractions the code should be built around. No design stage follows, so if one technical choice would be
+costly to get wrong (a platform, "no server", a data source), state it in `product.md` under Non-goals or the
+loop, marked `(assumed)` when the meeting didn't settle it.

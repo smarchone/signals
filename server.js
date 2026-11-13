@@ -15,11 +15,22 @@
 // Once distilled, you ask for PRDs; they get their own review gate, then each one can be handed off: copied as a
 // prompt for your own agent, or executed here in a background Claude Code session (claude --bg), one at a time.
 //
+// Two modes, chosen when the repo's first meeting starts (vibe unless asked for dev):
+//   dev   the above: a living context, many meetings, reviewed stages, PRDs, executions
+//   vibe  pitch -> meeting -> the brief stage only (business, product, model), with no review gate -> asks.
+//         Later meetings and change requests amend that context as in dev; there are no PRDs. Each ask is a
+//         background Claude Code session that builds straight from the context.
+//
 // A local Claude Code session per repo (the /signals skill) long-polls for jobs:
 //   panel    you spoke last in a meeting       -> the panel (CEO, PM, Architect) answers
 //   distill  a distill step is queued          -> the worker writes that step's files
 //   prd      you asked for PRDs                 -> the worker cuts the context into PRDs
 //   refine   you asked for a change in a file  -> the worker edits it (context file or PRD)
+//
+// Managed projects (repos Signals creates in the hub folder, HUB_DIR: ~/signals_workspace by default; vibe or dev)
+// share one worker instead: /signals run in HUB_DIR is the hub, polling GET /api/hub/jobs/next for the next job in
+// any of them. Each job names
+// its workspace and repo; the hub completes it there as usual.
 //
 //   node server.js        (or: signals serve <repo>, which starts this in the background and registers the repo)
 //
@@ -38,6 +49,13 @@ const PORT = Number(process.env.PORT) || 3461;
 const HOME = path.resolve(process.env.SIGNALS_HOME || path.join(os.homedir(), '.signals-daemon'));
 const REGISTRY = path.join(HOME, 'workspaces.json');
 const APP_DIR = path.join(HERE, 'app');
+// The hub folder: managed projects live here, one repo per subfolder, created from the UI
+const HUB_DIR = path.resolve(process.env.SIGNALS_HUB_DIR || path.join(os.homedir(), 'signals_workspace'));
+const isManaged = (repo) => repo.startsWith(HUB_DIR + path.sep);
+// The hub: one worker, which you start in HUB_DIR (/signals there), serves the jobs of every managed project
+// through one queue. waiters: hub polls waiting for a job in any managed project.
+const hub = { waiters: [] };
+const tilde = (p) => (p.startsWith(os.homedir()) ? `~${p.slice(os.homedir().length)}` : p);
 
 // The opinionated context set, in reading order, and the steps that write it.
 const CONTEXT_FILES = ['business.md', 'product.md', 'model.md', 'vocab.md', 'architecture.md'];
@@ -50,17 +68,29 @@ const isPrd = (name) => name.startsWith(`${PRD_DIR}/`);
 // Ideas distilled under the earlier four-step flow map onto the two stages
 const LEGACY_STEP = { outline: 'brief', model: 'design', architecture: 'design' };
 const stepOf = (sid) => DISTILL_STEPS.find((x) => x.id === sid);
+// Vibe mode distills the brief only, and skips its review gate
+const isVibe = (idea) => idea?.mode === 'vibe';
+const stepsFor = (idea) => (isVibe(idea) ? DISTILL_STEPS.slice(0, 1) : DISTILL_STEPS);
+const VIBE_FILES = DISTILL_STEPS[0].files;
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
+// A background Claude session that didn't start. Claude Code refuses folders you haven't trusted yet (a new
+// managed project never has been): say so, with the folder, so the UI can show how to trust it.
+function bgStartError(code, out, cwd) {
+  if (/workspace not trusted/i.test(out)) {
+    return Object.assign(httpError(409, `Claude Code doesn't trust ${tilde(cwd)} yet. Run claude there once and accept the trust prompt, then try again.`), { trust: cwd });
+  }
+  return httpError(502, `Couldn't start a background Claude session: ${out.trim().split('\n').at(-1) || `exit ${code}`}`);
+}
 const now = () => new Date().toISOString();
 const shortId = () => randomUUID().slice(0, 8);
 
 // ---------- Claude Code background sessions (claude --bg), which build PRDs ----------
 
 const CLAUDE = process.env.SIGNALS_CLAUDE || 'claude';
-function runClaude(args, cwd) {
+function runClaude(args, cwd, cmd = CLAUDE) {
   return new Promise((resolve) => {
-    const child = spawn(CLAUDE, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
@@ -71,6 +101,8 @@ function runClaude(args, cwd) {
 }
 // A session's state in `claude agents --json`, as an execution status
 const SESSION_STATUS = { working: 'building', blocked: 'blocked', done: 'built' };
+// The same, for a vibe ask: it ends when its session finishes its turn
+const ASK_STATUS = { working: 'building', blocked: 'blocked', done: 'done' };
 
 // The executor's last reply in a Claude session (its summary of the build), read from the session transcript
 // (<config>/projects/<project>/<session_id>.jsonl). Null if the transcript or a reply can't be found.
@@ -104,7 +136,8 @@ async function lastReply(sessionId) {
   return null;
 }
 // The section a PRD gets when you mark its execution complete: the executor's own summary of what it changed
-const SUMMARY_HEADING = '## Execution summary';
+const SUMMARY_HEADING = '## Build summary';
+const OLD_SUMMARY_HEADING = '## Execution summary'; // before the rename: replaced like the current one
 
 // ---------- Live updates (SSE), shared by all workspaces ----------
 
@@ -118,6 +151,7 @@ function broadcastAll(event, data) {
 
 function makeWorkspace(id, repo) {
   const ROOT = path.join(repo, '.signals');
+  const managed = isManaged(repo); // a managed project: the hub worker serves it
   const IDEA_FILE = path.join(ROOT, 'idea.json');
   fs.mkdirSync(ROOT, { recursive: true });
   const broadcast = (event, data) => broadcastAll(event, { ...data, workspace: id });
@@ -290,6 +324,7 @@ function makeWorkspace(id, repo) {
     return {
       id: idea.id,
       title: idea.title,
+      mode: idea.mode || 'dev',
       stage: idea.stage,
       meeting: { id: cur(idea).id, title: cur(idea).title, stage: cur(idea).stage },
       meeting_count: idea.meetings.length,
@@ -299,6 +334,7 @@ function makeWorkspace(id, repo) {
       message_count: cur(idea).messages.length,
       distill: idea.distill || null,
       prd: idea.prd || null,
+      asking: isVibe(idea) ? Boolean(openAsk(idea)) : undefined,
       waiting_on: pending ? 'claude' : cur(idea).stage === 'open' || reviewing(idea) || reviewingPrds(idea) ? 'you' : null,
       working: job?.idea === idea.id ? job.type : null,
     };
@@ -337,15 +373,18 @@ function makeWorkspace(id, repo) {
   }
 
   let job = null; // { id, type, idea, refinement?, claimed_at }
+  let worker = null; // { session, at }: a worker Signals started in the background, if any
   let waiters = [];
   let lastClaudeActivity = 0;
 
   function presence() {
     return {
       workspace: id,
-      listening: waiters.length > 0,
+      listening: waiters.length > 0 || (managed && hub.waiters.length > 0),
+      hub: managed,
       last_claude_at: lastClaudeActivity || null,
       job: job && { id: job.id, type: job.type, idea: job.idea },
+      worker,
     };
   }
   const broadcastPresence = () => broadcast('presence', presence());
@@ -355,6 +394,7 @@ function makeWorkspace(id, repo) {
   }
   function wake() {
     for (const w of waiters.slice()) w();
+    if (managed) for (const w of hub.waiters.slice()) w();
   }
 
   function claimJob() {
@@ -396,7 +436,8 @@ function makeWorkspace(id, repo) {
 
   function jobView(j) {
     const idea = getIdea(j.idea);
-    const base = { id: j.id, type: j.type, idea: { id: idea.id, title: idea.title } };
+    // workspace and repo: a hub worker serves many repos and completes each job in its own
+    const base = { id: j.id, type: j.type, workspace: id, repo, idea: { id: idea.id, title: idea.title } };
     const present = () => CONTEXT_FILES.filter((f) => fs.existsSync(contextFile(idea.id, f)));
     const log = fs.existsSync(LOG_FILE) ? LOG_FILE : null;
     if (j.type === 'panel') {
@@ -406,6 +447,7 @@ function makeWorkspace(id, repo) {
       return {
         job: {
           ...base,
+          ...(isVibe(idea) && { vibe: true }),
           meeting: { id: m.id, title: m.title, resumed: m.resumes?.at(-1) || null },
           context_dir: contextDir(),
           context,
@@ -419,21 +461,23 @@ function makeWorkspace(id, repo) {
     if (j.type === 'distill') {
       const m = meetingOf(idea, idea.distill.meeting);
       const step = stepOf(idea.distill.step);
-      const n = DISTILL_STEPS.indexOf(step);
+      const steps = stepsFor(idea);
+      const n = steps.indexOf(step);
       // update: the stage's files exist from an earlier pass, so edit them rather than start over
       j.mode ??= step.files.every((f) => fs.existsSync(contextFile(idea.id, f))) ? 'update' : 'create';
       const since = idea.distill.since;
       return {
         job: {
           ...base,
+          ...(isVibe(idea) && { vibe: true }),
           step: step.id,
-          step_number: `${n + 1} of ${DISTILL_STEPS.length}`,
+          step_number: `${n + 1} of ${steps.length}`,
           mode: j.mode,
           meeting: { id: m.id, title: m.title, resumed: Boolean(m.resumes?.length) },
           meetings_log: log,
           new_turns: j.mode === 'update' && since != null && since < m.messages.length ? transcript(m).slice(since) : null,
           files: step.files,
-          approved: [...new Set(DISTILL_STEPS.slice(0, n).flatMap((x) => x.files))].filter((f) => !step.files.includes(f)),
+          approved: [...new Set(steps.slice(0, n).flatMap((x) => x.files))].filter((f) => !step.files.includes(f)),
           context_dir: contextDir(idea.id),
           guidance: idea.distill.guidance || null,
           verdict: m.verdict,
@@ -542,6 +586,15 @@ function makeWorkspace(id, repo) {
       if (stale.length) throw httpError(409, `Write ${stale.join(', ')} for the ${step.label} step first (in ${contextDir(idea.id)})`);
       Object.assign(idea.distill, { status: 'review', note: reply || null, at: now() });
       (idea.distill.log ||= {})[step.id] = stageLog(log); // this stage's part of the meetings log; a redo replaces it
+      // Vibe: no review gate. The context lands as written and the call is logged now, as an approval would.
+      // What changed stays highlighted in the UI until you mark it reviewed.
+      if (isVibe(idea)) {
+        Object.assign(idea.distill, { status: 'done', approved: [step.id] });
+        idea.distilled = { at: now() };
+        const after = fileHashes();
+        appendLog(meetingOf(idea, idea.distill.meeting), idea.distill.revised ? 'context redone' : 'committed', logEntry(idea, changedBetween(idea.distill.before, after)));
+        idea.context_basis = after;
+      }
     } else if (j.type === 'prd') {
       const fresh = prdNames().filter((n) => fs.statSync(docFile(n)).mtimeMs >= j.claimed_ms - 1000);
       if (j.mode === 'create' && !fresh.length) throw httpError(409, `Write the PRDs first (01-<slug>.md, … in ${prdDir()})`);
@@ -588,10 +641,43 @@ Make local decisions yourself. If the PRD or the context looks wrong, don't work
 End with a short summary: what changed, how to try it, and how to check each Acceptance item.`;
   }
 
+  // ---------- Asks (vibe mode): each one a background Claude Code session that builds from the brief ----------
+  //
+  // One running at a time on this checkout. building -> blocked (it waits on you) -> done (its turn ended; its
+  // last reply is kept as the ask's result) · gone (the session was removed) · stopped (you ended it).
+  // Nothing flows back: an ask never changes the context.
+  const askOpen = (a) => ['building', 'blocked'].includes(a?.status);
+  const openAsk = (idea) => (idea?.asks || []).find(askOpen) || null;
+
+  function askPrompt(idea, text) {
+    const earlier = (idea.asks || []).map((a) => `- ${a.id}: ${a.text.split('\n')[0].slice(0, 120)}`);
+    return `${text}
+
+---
+This is build ${`B${(idea.asks?.length || 0) + 1}`} for "${idea.title}". Read .signals/context/ first (${VIBE_FILES.join(', ')}): it is the idea as the human decided it, the why, what we are building and its core abstractions. Build what is asked within that shape, using its terms.
+${earlier.length ? `\nEarlier builds, already in this checkout:\n${earlier.join('\n')}\n` : ''}
+Work directly in this checkout, on the current branch. Make every decision yourself and don't stop to ask unless you are truly blocked. Don't edit anything under .signals/.
+When done, if this is a git repository, commit your change on the current branch with a short message (don't branch or push), so each build is a checkpoint.
+End with a short summary: what you built and how to try it.`;
+  }
+
   // Bring open executions in line with their sessions (the daemon polls `claude agents --json --all`)
   async function syncExecutions(sessions) {
     const idea = [...ideas.values()][0];
     let moved = false;
+    for (const a of idea?.asks || []) {
+      if (!askOpen(a)) continue;
+      const s = sessions.find((x) => x.id === a.session);
+      if (s?.sessionId && s.sessionId !== a.session_id) {
+        a.session_id = s.sessionId;
+        moved = true;
+      }
+      const status = s ? ASK_STATUS[s.state] || 'done' : 'gone';
+      if (status === a.status) continue;
+      Object.assign(a, { status, at: now() });
+      if (status === 'done') a.result = await lastReply(a.session_id);
+      moved = true;
+    }
     for (const e of Object.values(idea?.executions || {})) {
       if (!execOpen(e)) continue;
       const s = sessions.find((x) => x.id === e.session);
@@ -666,8 +752,9 @@ End with a short summary: what changed, how to try it, and how to check each Acc
     // each later one proposes a change to it. One meeting is active at a time.
     'POST /api/ideas': async (_q, b) => {
       const text = userText(b);
-      const title = String(b.title || '').trim() || text.split('\n')[0].slice(0, 60);
+      const title = String(b.title || '').trim() || text.split('\n').find((l) => l.trim())?.replace(/^#+\s*/, '').trim().slice(0, 60) || 'Idea';
       const meeting = { id: 'M1', title, stage: 'open', created_at: now(), messages: [{ id: shortId(), author: 'you', text, at: now() }], verdict: null, resumes: [] };
+      // A new idea is vibe unless dev mode was asked for (dev is for advanced users)
       let idea = [...ideas.values()][0];
       if (idea) {
         const m = cur(idea);
@@ -677,7 +764,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
         meeting.id = `M${idea.meetings.length + 1}`;
         idea.meetings.push(meeting);
       } else {
-        idea = { id: ideaSlug(title), title, created_at: now(), updated_at: now(), meetings: [meeting], refinements: [] };
+        idea = { id: ideaSlug(title), title, mode: b.mode === 'dev' ? 'dev' : 'vibe', created_at: now(), updated_at: now(), meetings: [meeting], refinements: [] };
         ideas.set(idea.id, idea);
       }
       await save(idea);
@@ -836,6 +923,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
     // Write the PRDs, or update them (with guidance: what to change; after a context change: catch up)
     'POST /api/prds/plan': async (_q, b) => {
       const idea = getIdea(b.id);
+      if (isVibe(idea)) throw httpError(409, 'Vibe mode has no PRDs: start a build instead.');
       if (idea.stage !== 'distilled') throw httpError(409, 'Approve the context first: PRDs are cut from the distilled context.');
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
       if (idea.prd?.status === 'queued') throw httpError(409, 'The PRDs are already queued.');
@@ -879,7 +967,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       const idea = getIdea(b.id);
       const name = docName(docFile(b.file));
       if (!isPrd(name) || !fs.existsSync(docFile(name))) throw httpError(404, `No PRD ${b.file}`);
-      if (idea.prd?.status !== 'done') throw httpError(409, 'Approve the PRDs before executing one.');
+      if (idea.prd?.status !== 'done') throw httpError(409, 'Approve the PRDs before building one.');
       if (idea.refinements.some((r) => r.status === 'pending' && r.file === name)) throw httpError(409, 'A change you asked for on this PRD is still being made.');
       const open = openExecution(idea);
       if (open) throw httpError(409, `${open[0]} is still open. Test it, commit, and mark it complete (or stop it) first.`);
@@ -887,7 +975,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       const label = `signals · PRD ${prdHeading(name)}`.slice(0, 60);
       const { code, out } = await runClaude(['--bg', '-n', label, execPrompt(name)], repo);
       const session = out.match(/backgrounded\s+·\s+([0-9a-f]+)/)?.[1];
-      if (code !== 0 || !session) throw httpError(502, `Couldn't start a background Claude session: ${out.trim().split('\n').at(-1) || `exit ${code}`}`);
+      if (code !== 0 || !session) throw bgStartError(code, out, repo);
       const session_id = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0];
       // Executing again keeps the earlier runs' sessions, newest first
       const prev = idea.executions?.[name];
@@ -914,7 +1002,7 @@ End with a short summary: what changed, how to try it, and how to check each Acc
         if (reply) {
           // Shift the reply's own headings below the section's, and replace a summary from an earlier completion
           const body = reply.replace(/^(#{1,5})(\s)/gm, '$1##$2');
-          const prd = (await readFile(docFile(name), 'utf8')).split(`\n${SUMMARY_HEADING}\n`)[0].trimEnd();
+          const prd = (await readFile(docFile(name), 'utf8')).split(`\n${SUMMARY_HEADING}\n`)[0].split(`\n${OLD_SUMMARY_HEADING}\n`)[0].trimEnd();
           await writeFile(docFile(name), `${prd}\n\n${SUMMARY_HEADING}\n\n${body}\n`);
         }
         Object.assign(e, { status: 'complete', summarized: Boolean(reply), at: now() });
@@ -945,6 +1033,38 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       return { ok: true };
     },
 
+    // ---------- Asks (vibe mode) ----------
+
+    // Build something now: a background Claude Code session on this checkout, from the brief
+    'POST /api/asks': async (_q, b) => {
+      const idea = getIdea(b.id);
+      if (!isVibe(idea)) throw httpError(409, 'Builds without a PRD are for vibe mode. In dev mode, build a PRD.');
+      if (idea.stage !== 'distilled') throw httpError(409, 'The context is still being written. Build once it lands.');
+      const text = userText(b);
+      const open = openAsk(idea);
+      if (open) throw httpError(409, `${open.id} is still building. Wait for it, or stop it.`);
+      const aid = `B${(idea.asks?.length || 0) + 1}`; // B1, B2…: builds (asks before the rename kept A1…)
+      const label = `signals · ${aid} · ${text.split('\n')[0]}`.slice(0, 60);
+      const { code, out } = await runClaude(['--bg', '-n', label, askPrompt(idea, text)], repo);
+      const session = out.match(/backgrounded\s+·\s+([0-9a-f]+)/)?.[1];
+      if (code !== 0 || !session) throw bgStartError(code, out, repo);
+      const session_id = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0];
+      const ask = { id: aid, text, session, ...(session_id && { session_id }), status: 'building', started_at: now(), at: now() };
+      (idea.asks ||= []).push(ask);
+      await save(idea);
+      return ask;
+    },
+
+    'POST /api/asks/stop': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const a = (idea.asks || []).find((x) => x.id === b.ask);
+      if (!askOpen(a)) throw httpError(409, `${b.ask} isn't running.`);
+      await runClaude(['stop', a.session], repo);
+      Object.assign(a, { status: 'stopped', at: now() });
+      await save(idea);
+      return a;
+    },
+
     'POST /api/ideas/delete': async (_q, b) => {
       const idea = getIdea(b.id);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
@@ -972,6 +1092,20 @@ End with a short summary: what changed, how to try it, and how to check each Acc
       return { ok: true };
     },
     'GET /api/presence': async () => presence(),
+
+    // Start the /signals worker for this repo in a background Claude Code session (a new repo has none)
+    'POST /api/worker/start': async () => {
+      if (managed) throw httpError(409, `Managed projects share the hub worker: run /signals in ${tilde(HUB_DIR)}.`);
+      if (waiters.length || job) throw httpError(409, 'A worker is already connected.');
+      // One started recently is probably still connecting (or waiting on a permission): don't start a second
+      if (worker && Date.now() - Date.parse(worker.at) < 120000) throw httpError(409, `A worker is starting. If it's stuck, run: claude attach ${worker.session}`);
+      const { code, out } = await runClaude(['--bg', '-n', `signals worker · ${path.basename(repo)}`, '/signals'], repo);
+      const session = out.match(/backgrounded\s+·\s+([0-9a-f]+)/)?.[1];
+      if (code !== 0 || !session) throw bgStartError(code, out, repo);
+      worker = { session, at: now() };
+      broadcastPresence();
+      return worker;
+    },
   };
 
   loadAll();
@@ -981,8 +1115,25 @@ End with a short summary: what changed, how to try it, and how to check each Acc
     root: ROOT,
     routes,
     presence,
-    executing: () => Boolean(openExecution([...ideas.values()][0])),
+    executing: () => Boolean(openExecution([...ideas.values()][0]) || openAsk([...ideas.values()][0])),
     syncExecutions,
+    managed,
+    broadcastPresence,
+    // The hub: this repo's next job without waiting (the one in flight, if any), or null; and how old it is
+    hubClaim: () => {
+      const j = claimJob();
+      if (!j) return null;
+      claudeActed();
+      return jobView(j).job;
+    },
+    hubPendingAt: () => {
+      if (job) return 0;
+      const due = [...ideas.values()].map(needs).filter(Boolean).map((n) => Date.parse(n.at));
+      return due.length ? Math.min(...due) : null;
+    },
+    hubRelease: (jid) => {
+      if (job?.id === jid) endJob();
+    },
     idea: () => {
       const i = [...ideas.values()][0];
       return i ? summary(i) : null;
@@ -1022,24 +1173,50 @@ async function loadRegistry() {
   }
 }
 
+const hubPresence = () => {
+  for (const w of workspaces.values()) if (w.managed) w.broadcastPresence();
+};
+
 // path: the repo folder shown with ~ for the home directory
 const describe = (w) => ({
   id: w.id,
   name: path.basename(w.repo),
   repo: w.repo,
-  path: w.repo.startsWith(os.homedir()) ? `~${w.repo.slice(os.homedir().length)}` : w.repo,
+  path: tilde(w.repo),
+  managed: w.managed,
   root: w.root,
   presence: w.presence(),
   idea: w.idea(),
 });
 
 const globalRoutes = {
-  'GET /api/workspaces': async () => ({ workspaces: [...workspaces.values()].map(describe) }),
+  'GET /api/workspaces': async () => ({
+    workspaces: [...workspaces.values()].map(describe),
+    hub_dir: tilde(HUB_DIR),
+    hub: { listening: hub.waiters.length > 0 },
+  }),
+
+  // A new managed project: a fresh git repo in the hub folder, registered as a workspace
+  'POST /api/workspaces/new': async (_q, b) => {
+    const name = String(b.name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+    if (!name) throw httpError(400, 'Give it a name: letters, digits and dashes');
+    const repo = path.join(HUB_DIR, name);
+    if (fs.existsSync(repo)) throw httpError(409, `${tilde(repo)} already exists. Pick another name.`);
+    await mkdir(repo, { recursive: true });
+    const git = await runClaude(['init', '-q'], repo, 'git');
+    if (git.code !== 0) console.warn(`git init failed in ${repo}: ${git.out.trim()}`);
+    const w = addWorkspace(repo);
+    await saveRegistry();
+    broadcastAll('workspaces_changed', {});
+    return { ...describe(w), git: git.code === 0 };
+  },
 
   'POST /api/workspaces': async (_q, b) => {
     if (typeof b.repo !== 'string' || !path.isAbsolute(b.repo)) throw httpError(400, 'repo must be an absolute path');
     const repo = path.resolve(b.repo);
     if (!fs.statSync(repo, { throwIfNoEntry: false })?.isDirectory()) throw httpError(400, `Not a folder: ${repo}`);
+    // The hub folder isn't a repo: a worker started there is the hub for every managed project
+    if (repo === HUB_DIR) return { hub: true, root: repo, url: `http://127.0.0.1:${PORT}/#/` };
     const isNew = !workspaces.has(workspaceId(repo));
     const w = addWorkspace(repo);
     if (isNew) {
@@ -1047,6 +1224,46 @@ const globalRoutes = {
       broadcastAll('workspaces_changed', {});
     }
     return { id: w.id, repo: w.repo, root: w.root, url: `http://127.0.0.1:${PORT}/#/${w.id}` };
+  },
+
+  // The hub's long poll: the oldest waiting job across every managed project
+  'GET /api/hub/jobs/next': async (q, _b, signal) => {
+    const timeout = Math.min(Number(q.get('timeout') ?? 300), 300);
+    const managed = () => [...workspaces.values()].filter((w) => w.managed);
+    const claim = () => {
+      const due = managed()
+        .map((w) => ({ w, at: w.hubPendingAt() }))
+        .filter((x) => x.at != null)
+        .sort((a, b) => a.at - b.at);
+      for (const { w } of due) {
+        const job = w.hubClaim();
+        if (job) return { w, job };
+      }
+      return null;
+    };
+    let c = claim();
+    if (!c && timeout > 0 && !signal?.aborted) {
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', done);
+          hub.waiters = hub.waiters.filter((w) => w !== done);
+          hubPresence();
+          resolve();
+        };
+        const timer = setTimeout(done, timeout * 1000);
+        hub.waiters.push(done);
+        signal?.addEventListener('abort', done, { once: true });
+        hubPresence();
+      });
+      if (signal?.aborted) return { job: null };
+      c = claim();
+    }
+    if (c && signal?.aborted) {
+      c.w.hubRelease(c.job.id);
+      return { job: null };
+    }
+    return { job: c?.job || null };
   },
 
   'POST /api/workspaces/remove': async (_q, b) => {
@@ -1150,7 +1367,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': `${MIME[path.extname(file)] || 'application/octet-stream'}; charset=utf-8`, 'Cache-Control': 'no-cache' });
     res.end(data);
   } catch (err) {
-    send(res, err.status || 500, { error: err.message });
+    send(res, err.status || 500, { error: err.message, ...(err.trust && { trust: err.trust }) });
   }
 });
 

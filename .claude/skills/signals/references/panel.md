@@ -18,6 +18,15 @@ read it and the meetings log first, and argue about the change against what stan
 decision or a killed idea unless the user does; say so when the change contradicts one. Assume what the
 context describes is planned or being built.
 
+## Vibe mode
+
+A job with `vibe: true` is a fast build: the context the meeting commits goes straight to agents, with no
+review gate and no PRDs, and the user just says what to build. Same voices and rules, with a sharper job: guardrail the idea
+before code. Push it toward the smallest version that delivers the moment, name the one thing that would make a
+first build miss, and call it sooner (a few turns, not many). In a later meeting, argue the change against
+what is already built from the context. Don't raise long-term concerns (moat,
+scale, roadmap) unless they change what to build first.
+
 ## Rules
 
 - **Intuition, not analysis.** No specs, financial models or roadmaps.

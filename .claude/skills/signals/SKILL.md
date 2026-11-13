@@ -18,6 +18,18 @@ The daemon serves every registered repo and hands out **jobs**, one at a time pe
 2. The poller is `scripts/poll.sh` in this skill's directory: `<base>/scripts/poll.sh <workspace>`. It waits
    for the next job, prints it as JSON and exits.
 
+### Hub mode
+
+If `signals serve` printed `hub: yes`, this session runs in the **hub folder** and is the **hub**: one worker
+for every **managed project** in it (each a repo in a subfolder, Signals created it, vibe or dev mode). Poll with `<base>/scripts/poll.sh --hub`.
+Every job carries its `workspace` (complete it at `/api/w/<workspace>/jobs/complete`) and its `repo` (the
+folder it belongs to; all paths in the job are absolute).
+
+Jobs from different repos arrive interleaved. Keep them apart: a job only ever uses its own repo's files and
+transcript. Whatever you read for one repo says nothing about another, so when a job's `workspace` differs from
+the last one you handled, read its context afresh instead of relying on memory. Never write outside the job's
+`repo`. The user clears this session's context themselves when it grows.
+
 ## Loop
 
 1. Start the poller with Bash and `run_in_background: true`. Stay idle and silent until it exits.
@@ -27,7 +39,11 @@ The daemon serves every registered repo and hands out **jobs**, one at a time pe
 
 ## Jobs
 
-Every job has `id`, `type` and `idea: {id, title}`. Finish it with one call (build the JSON with `jq -n` or
+Every job has `id`, `type`, `workspace`, `repo` and `idea: {id, title}`. A job with `vibe: true` belongs to a **vibe mode** repo,
+for building fast rather than steering a long project. Meetings work as in dev (a pitch, later meetings that
+change the context, resume), but committing writes only the first stage (business, product, model: no design
+stage, no review gate, no PRDs). The user then starts builds, background sessions that work straight from those
+files, and can ask for changes to them. Finish a job with one call (build the JSON with `jq -n` or
 escape it carefully):
 
 ```bash
@@ -50,6 +66,9 @@ up; later ones propose a change to it; `resumed` is set when the user reopened i
   them when the meeting starts and again whenever `context_version` changes; between turns, rely on what you
   read. Treat everything in the context as planned or being built, unless the user says otherwise.
 - this meeting's `transcript`.
+
+In vibe mode, follow the vibe section of `references/panel.md`: nothing reviews the context before builds work
+from it, so the meeting is the guardrail.
 
 Never read older meetings' transcripts, and don't open PRDs in `prds_dir` unless the user names one: pull in
 just that one.
@@ -91,6 +110,11 @@ narrated.
   create, the file's central claim. Leave out files you didn't touch.
 
 The design stage sends only `context`.
+
+With `vibe: true` there is only the first stage (`step` is `brief`, `step_number` is `1 of 1`), and nobody
+reviews it before building: the files are what every build works from. Follow the vibe notes in
+`references/distill/brief.md`. Send the `log` as usual: with no gate, the call is logged as soon as you
+complete the job, and later meetings read it.
 
 ### `prd`
 
