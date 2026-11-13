@@ -135,11 +135,20 @@ one cut the user should check. On update: what changed and where, and any overla
 
 ### `refine`
 
-Change `file` as `request` asks; `highlighted_text` (may be null) is the passage they selected. `kind` is
-`context` or `prd`. Make a focused edit and keep the file's spec (`references/distill/` or
-`references/prd.md`). A context change may ripple to other files in `context_dir` (a renamed term); don't
-edit PRDs for it (the UI flags them for an update). A PRD change stays in `prds_dir`: if it needs the context
-to change, ask instead. `text`: one or two sentences on what changed. If the request is ambiguous, don't
-edit: ask one concrete question as `text` and add `"question": true`.
+The user reviewed context files or PRDs and sent a batch of comments. `requests` lists them, each with `id`,
+`file`, `kind` (`context` or `prd`), `request`, and `highlighted_text` (the passage they selected; null for a
+comment on the whole file). Read them all before editing: together they are one review, so make one coherent
+pass per file rather than a patch per comment, and resolve comments that touch the same passage together. Keep
+each file's spec (`references/distill/` or `references/prd.md`) and make focused edits. A context change may
+ripple to other files in `context_dir` (a renamed term); don't edit PRDs for it (the UI flags them for an
+update). A PRD change stays in `prds_dir`: if it needs the context to change, ask instead.
+
+A request may carry `thread`: the conversation on that comment so far (the user's earlier comments and your
+answers). Its `request` is the user's reply: read it in that light (often an answer to your question).
+
+`text`: one or two sentences on what changed across the batch. Each answer lands in its comment's thread, so
+also send `"replies": {"<request id>": "<one line on what you did for it>"}`. If a comment is ambiguous, skip
+it, act on the rest, and ask one concrete question about it in `"questions": {"<request id>": "<question>"}`
+instead. If you can act on none of them, send `questions` for each and say so in `text`.
 
 Print at most one line per job.

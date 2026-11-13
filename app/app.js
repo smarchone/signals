@@ -30,6 +30,8 @@ const canRefineDoc = (i, name) => name === LOG ? false : (isPrd(name) ? ['review
 // A PRD being executed, or complete, is what was built: it stays as it is (a stopped one can still change)
 const prdLocked = (i, name) => ['building', 'blocked', 'built', 'gone', 'complete'].includes(i.executions?.[name]?.status);
 const prdsPending = (i) => i.refinements.some((r) => r.status === 'pending' && isPrd(r.file));
+// Draft comments (in the daemon's memory until you send them), on one file or all
+const commentsOn = (i, file) => (i.comments || []).filter((t) => !file || t.file === file);
 // "# PRD 01: Walking skeleton" -> { num: '01', title: 'Walking skeleton' }
 function prdLabel(f) {
   const base = f.name.slice(5).replace(/\.md$/, '');
@@ -53,6 +55,13 @@ const S = {
   newProject: '', // the New project name box
   editingPitch: false, // the pitch: being edited (else shown rendered, like a context file)
   ask: '', // the vibe ask box
+  activeThread: null, // the comment thread open in the margin ('new': the one being written)
+  newComment: null, // { file, quote }: a comment being written (quote null: on the whole file)
+  newCommentText: null,
+  replyText: {}, // thread id -> reply being written, kept across live re-renders
+  editMsg: null, // the draft message being edited, and its text so far
+  editMsgText: null,
+  showResolved: false, // the margin shows resolved comments instead of the open ones
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -183,8 +192,7 @@ function renderIndex(main) {
       return `<li class="ws-row">
         <button class="ws-card" data-repo="${esc(w.id)}">
           ${FOLDER_ICON}
-          <span class="ws-main"><span class="ws-card-name">${esc(w.name)}</span><span class="ws-card-path">${esc(w.path || w.repo)}</span></span>
-          <span class="ws-idea">${w.idea ? `${isVibe(w.idea) ? '<span class="mode-tag">vibe</span>' : ''}${esc(w.idea.title)}${w.idea.meeting_count > 1 ? ` · ${esc(w.idea.meeting.id)}` : ''}` : ''}</span>
+          <span class="ws-main"><span class="ws-card-name">${esc(w.name)}${isVibe(w.idea) ? '<span class="mode-tag">vibe</span>' : ''}</span><span class="ws-card-path">${esc(w.path || w.repo)}</span></span>
           <span class="ws-card-status ${st?.cls || ''}">${esc(st?.text || (w.idea?.prd?.status === 'done' ? 'PRDs ready to hand off' : w.idea?.stage === 'distilled' ? (isVibe(w.idea) ? 'Ready to build' : 'Context ready') : ''))}</span>
           <span class="worker ${cls}" title="${label}"></span>
         </button>
@@ -197,15 +205,22 @@ function renderIndex(main) {
     <div class="body"><div class="index">
       <div class="index-h"><h2 title="Repos Signals created in ${esc(S.hubDir)}, served by one hub worker">Managed projects</h2>${hubBadge()}</div>
       <div class="new-project">
-        <span class="np-path" title="${esc(S.hubDir)}"><bdi>${esc(S.hubDir)}/</bdi></span>
-        <input id="new-project" data-keep="newproj" placeholder="pomodoro-dog" value="${esc(S.newProject)}" autocomplete="off" spellcheck="false" />
+        <input id="new-project" data-keep="newproj" placeholder="Project name" aria-label="Project name" value="${esc(S.newProject)}" autocomplete="off" spellcheck="false" />
         <button class="btn primary sm" id="create-project" ${S.newProject.trim() ? '' : 'disabled'}>New project</button>
       </div>
+      <p class="np-where" id="np-where">${projectWhere()}</p>
       ${managed.length ? `<ul class="ws-list">${managed.map(row).join('')}</ul>` : '<p class="index-hint">A fresh git repo per idea, created here and served by one hub worker. Vibe or dev, your pick on its first pitch.</p>'}
       <h2 class="index-h2-gap">Workspaces</h2>
       ${repos.length ? `<ul class="ws-list">${repos.map(row).join('')}</ul>` : ''}
       <p class="index-hint">Add a repo: run <code>signals serve</code> in it, or <code>/signals</code> in Claude Code there.</p>
     </div></div>`;
+}
+
+// Where a new project goes: a fresh git repo in the hub folder, named like the server names it
+const projectSlug = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+function projectWhere() {
+  const slug = projectSlug(S.newProject);
+  return `Lives in <code>${esc(S.hubDir)}/${slug ? `<b>${esc(slug)}</b>` : '…'}</code>`;
 }
 
 // The hub: one worker for every managed project, which you run in the hub folder
@@ -302,6 +317,9 @@ function renderMain() {
     const doc = $('.ctx-doc');
     if (doc && sameView && top != null) doc.scrollTop = top;
     showChanges();
+    markComments();
+    document.querySelectorAll('.margin textarea').forEach(growArea);
+    layoutThreads();
     autosize($('#prd-guidance'));
     const box = $('#change-prds-text') || $('#ask-text');
     if (box && document.activeElement !== box) box.focus();
@@ -663,9 +681,9 @@ function renderGate(i) {
       ${i.distill.note ? `<div class="gate-note md">${DOMPurify.sanitize(marked.parse(i.distill.note, { gfm: true, breaks: true }))}</div>` : ''}
       ${logLine}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-step">Redo…</button>
-        <button class="btn good sm" id="approve-step" ${pend ? 'disabled title="Wait for your change requests to land"' : ''}>${next ? `Approve → ${esc(next.what.toLowerCase())}` : 'Approve'}</button>
+        <button class="btn good sm" id="approve-step" ${pend ? 'disabled title="Wait for your change requests to land"' : draftsIn(i) ? 'disabled title="Send or discard your draft comments first"' : ''}>${next ? `Approve → ${esc(next.what.toLowerCase())}` : 'Approve'}</button>
       </div>
     </div>`;
   }
@@ -706,7 +724,8 @@ function renderFileList(i, open) {
     const pend = i.refinements.filter((r) => r.file === f && r.status === 'pending').length;
     if (pend) st = 'working';
     const icon = STATE_ICON[st === 'written' ? 'done' : st] || STATE_ICON.todo;
-    const right = pend ? `<span class="pend">${pend} pending</span>` : i.changes?.[f] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
+    const drafts = draftsIn(i, f);
+    const right = pend ? `<span class="pend">${pend} pending</span>` : drafts ? `<span class="pend draft" title="Draft comments, not sent yet">${drafts} draft${drafts === 1 ? '' : 's'}</span>` : i.changes?.[f] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
     return `<button class="ctx-file ${f === open ? 'active' : ''}" ${has(f) ? `data-file="${esc(f)}"` : 'disabled'}>${icon}${esc(FILE_LABEL[f] || f)}${right}</button>`;
   };
   const live = (step) => (i.working === 'distill' && stepState(i, step.id) === 'working' ? writing(step) : null);
@@ -729,8 +748,10 @@ function renderContext() {
       : `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>${isVibe(i) ? 'The context appears here: business, product and model.' : 'The brief appears here first: product and business, the must-read. You review each step before the next one starts.'}</p></div></div>`;
   } else {
     // Only what needs attention: changes still being made, and questions the worker asked back
-    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending');
-    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked');
+    // A request from a comment thread shows in the margin instead
+    const inMargin = new Set(commentsOn(i).map((t) => t.id));
+    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending' && !inMargin.has(r.thread));
+    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked' && !inMargin.has(r.thread));
     const quote = (r) => esc((r.quote || r.text).replace(/\s+/g, ' ').slice(0, 80));
     const notes = [
       ...pending.map((r) => `<div class="note-line"><span class="dot busy"></span>${i.working === 'refine' ? 'Changing' : 'Queued'} · <span class="q">${quote(r)}</span></div>`),
@@ -744,13 +765,11 @@ function renderContext() {
       : i.stage === 'distilled' && lc && !hasOwn && (!i.prd || (i.prd.status === 'done' && i.prd_stale))
       ? `<div class="note-line next-line">Context approved. Next: cut ${i.prd ? `${esc(lc.id)}'s change` : 'the work'} into PRDs for your executor.<button class="btn primary sm" data-tab="prds">${i.prd ? 'Add its PRDs →' : 'Plan PRDs →'}</button></div>`
       : '';
-    doc = `<div class="ctx-doc-inner">
+    doc = withMargin(i, file, `
       ${gate}${next}
-      <div class="ctx-tools">${canRefine(i) ? '<button class="btn sm" id="ask-file">Ask for a change</button>' : ''}</div>
       ${notes ? `<div class="notes">${notes}</div>` : ''}
       <div id="changes-line"></div>
-      <article class="md" id="doc" data-file="${esc(file)}">${md(have.get(file).content)}</article>
-    </div>`;
+      <article class="md" id="doc" data-file="${esc(file)}">${md(have.get(file).content)}</article>`);
   }
   return `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderFileList(i, file)}</div><div class="ctx-doc">${doc}</div></div></div>`;
 }
@@ -851,7 +870,8 @@ function renderPrdList(i, open) {
     else if (p.status === 'review' && (!p.updated || fresh || i.changes?.[f.name] != null)) st = 'review'; // after an update, only what moved
     else if (p.status === 'queued' && !updating) st = writing ? (f.name === i.prds.at(-1)?.name ? 'working' : 'done') : 'queued';
     const icon = st === 'handed' ? '<span class="st handed" title="Handed off">↗</span>' : STATE_ICON[st];
-    const right = pend ? `<span class="pend">${pend} pending</span>` : fresh ? '<span class="pend">new</span>' : i.changes?.[f.name] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
+    const drafts = draftsIn(i, f.name);
+    const right = pend ? `<span class="pend">${pend} pending</span>` : drafts ? `<span class="pend draft" title="Draft comments, not sent yet">${drafts} draft${drafts === 1 ? '' : 's'}</span>` : fresh ? '<span class="pend">new</span>' : i.changes?.[f.name] != null ? '<span class="chg-dot" title="Changed since you last reviewed it"></span>' : '';
     return `<button class="ctx-file ${f.name === open ? 'active' : ''}" data-prd="${esc(f.name.slice(5))}" title="${esc(f.name)}">${icon}${num ? `<span class="prd-num">${esc(num)}</span>` : ''}<span class="prd-title">${esc(title)}</span>${right}</button>`;
   });
   // Grouped by the meeting each PRD builds, once there is more than one
@@ -876,7 +896,7 @@ function renderPrdGate(i) {
   const p = i.prd;
   if (!p) return '';
   const note = p.note ? `<div class="gate-note md">${DOMPurify.sanitize(marked.parse(p.note, { gfm: true, breaks: true }))}</div>` : '';
-  const approve = `<button class="btn good sm" id="approve-prds" ${prdsPending(i) || i.working ? 'disabled title="Wait for your change requests to land"' : ''}>Approve → ready to hand off</button>`;
+  const approve = `<button class="btn good sm" id="approve-prds" ${prdsPending(i) || i.working ? 'disabled title="Wait for your change requests to land"' : commentsOn(i).some((t) => isPrd(t.file) && threadHasDraft(t)) ? 'disabled title="Send or discard your draft comments first"' : ''}>Approve → ready to hand off</button>`;
   if (p.status === 'review' && p.updated) {
     const added = (p.added || []).filter((n) => i.prds.some((f) => f.name === n)).length;
     const changed = i.prds.filter((f) => !isNewPrd(i, f.name) && i.changes?.[f.name] != null).length;
@@ -886,7 +906,7 @@ function renderPrdGate(i) {
       <p>Review what moved (marked in the list); the rest is as you approved it.</p>
       ${note}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-prds">Redo…</button>
         ${approve}
       </div>
@@ -898,7 +918,7 @@ function renderPrdGate(i) {
       <p>The work, cut into PRs in build order. Check the breakdown first (is 01 a thin slice of the whole loop?), then each PRD's acceptance checks.</p>
       ${note}
       <div class="gate-row">
-        <span class="gate-hint">Select any text to ask for a change.</span>
+        <span class="gate-hint">Select any text to comment. Send your comments together.</span>
         <button class="btn ghost sm" id="redo-prds">Redo…</button>
         ${approve}
       </div>
@@ -966,8 +986,10 @@ function renderPrds() {
     doc = `<div class="ctx-doc-inner">${gate}<div class="distill-wait"><h2>Nothing written yet</h2><p>The PRDs appear here one by one, in build order.</p></div></div>`;
   } else {
     const f = i.prds.find((x) => x.name === file);
-    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending');
-    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked');
+    // A request from a comment thread shows in the margin instead
+    const inMargin = new Set(commentsOn(i).map((t) => t.id));
+    const pending = i.refinements.filter((r) => r.file === file && r.status === 'pending' && !inMargin.has(r.thread));
+    const asked = i.refinements.filter((r) => r.file === file && r.status === 'asked' && !inMargin.has(r.thread));
     const quote = (r) => esc((r.quote || r.text).replace(/\s+/g, ' ').slice(0, 80));
     const notes = [
       ...pending.map((r) => `<div class="note-line"><span class="dot busy"></span>${i.working === 'refine' ? 'Changing' : 'Queued'} · <span class="q">${quote(r)}</span></div>`),
@@ -980,18 +1002,16 @@ function renderPrds() {
     const execOff = open ? `disabled title="${esc(prdLabel(i.prds.find((x) => x.name === open) || { name: open, content: '' }).title)} is still open: mark it complete or stop it first"` : 'title="Build it now in a background Claude Code session, right on this checkout"';
     const tools = [
       canRefineDoc(i, file) && !i.working ? `<button class="btn ghost sm danger" data-remove-prd="${esc(file)}" title="Delete this PRD">Remove</button>` : '',
-      canRefineDoc(i, file) ? '<button class="btn sm" id="ask-file">Ask for a change</button>' : '',
       ready && !isExecOpen(ex) && ex?.status !== 'complete' ? `<button class="btn sm" data-handoff="${esc(file)}" title="Copy a prompt for your own coding agent and mark this PRD handed off">Copy prompt</button>` : '',
       canExec ? `<button class="btn primary sm" data-execute="${esc(file)}" ${execOff}>${ex ? 'Build again' : 'Build'}</button>` : '',
     ].join('');
-    doc = `<div class="ctx-doc-inner">
+    doc = withMargin(i, file, `
       ${gate}
-      <div class="ctx-tools">${tools}</div>
+      ${tools ? `<div class="ctx-tools">${tools}</div>` : ''}
       ${renderExecution(file, ex)}
       ${notes ? `<div class="notes">${notes}</div>` : ''}
       <div id="changes-line"></div>
-      <article class="md" id="doc" data-file="${esc(file)}">${md(f.content)}</article>
-    </div>`;
+      <article class="md" id="doc" data-file="${esc(file)}">${md(f.content)}</article>`);
   }
   return `<div class="body" style="overflow:hidden"><div class="ctx"><div class="ctx-files">${renderPrdList(i, file)}</div><div class="ctx-doc">${doc}</div></div></div>`;
 }
@@ -1093,68 +1113,376 @@ async function submitAsk() {
   }
 }
 
-// ---------- Ask for a change (on a selection or the whole file) ----------
+// ---------- Comments: threads in the right margin, drafted as you read, sent together ----------
+//
+// A comment and its replies are a thread, kept in the daemon's memory. What you write is a draft until you send
+// the batch; the worker then takes every thread with drafts in one job, and its answer (done, or a question)
+// lands back in the thread. A question stays open for your answer; a done thread resolves, leaving the margin
+// for the resolved list, so the margin only holds what still needs you.
+
+const draftsIn = (i, file) => commentsOn(i, file).reduce((n, t) => n + t.messages.filter((m) => m.draft).length, 0);
+const threadHasDraft = (t) => t.messages.some((m) => m.draft);
+const openThreads = (i, file) => commentsOn(i, file).filter((t) => !t.resolved);
+const resolvedThreads = (i, file) => commentsOn(i, file).filter((t) => t.resolved);
+const oneLine = (s) => esc(String(s).replace(/\s+/g, ' '));
+
+// The document with its comment margin, when the file can take comments or has any
+function withMargin(i, file, inner) {
+  const margin = renderMargin(i, file);
+  return margin
+    ? `<div class="ctx-doc-inner wide"><div class="sheet"><div class="page">${inner}</div>${margin}</div></div>`
+    : `<div class="ctx-doc-inner">${inner}</div>`;
+}
+
+function renderMargin(i, file) {
+  const can = canRefineDoc(i, file);
+  const mine = openThreads(i, file);
+  const done = resolvedThreads(i, file);
+  if (!can && !mine.length && !done.length) return '';
+  const resolvedView = S.showResolved && done.length > 0;
+  const total = draftsIn(i);
+  const files = new Set(commentsOn(i).filter(threadHasDraft).map((t) => t.file)).size;
+  const batch = total
+    ? `<div class="m-batch" title="${total} draft${total === 1 ? '' : 's'}${files > 1 ? ` across ${files} files` : ''}. The worker sees them when you send."><span class="m-n">${total} draft${total === 1 ? '' : 's'}${files > 1 ? ` · ${files} files` : ''}</span><button class="link" id="discard-comments">Discard</button><button class="m-send" id="send-comments" title="Send all drafts to the worker (⌘⇧↵)">Send</button></div>`
+    : '';
+  // Open and resolved are two views of the margin, never both at once
+  const views = done.length
+    ? `<span class="m-views"><button class="${resolvedView ? '' : 'on'}" data-margin-view="open">Open${mine.length ? ` ${mine.length}` : ''}</button><button class="${resolvedView ? 'on' : ''}" data-margin-view="resolved">Resolved ${done.length}</button></span>`
+    : '<span></span>';
+  // The head stays in view as you scroll: the views, the batch, and the resolved list
+  const top = (extra = '') => `<div class="m-top"><div class="margin-head">${views}${can && !resolvedView ? '<button class="link" id="ask-file" title="A comment on the whole file">+ File comment</button>' : ''}</div>${batch}${extra}</div>`;
+  if (resolvedView) return `<aside class="margin">${top(resolvedList(done))}</aside>`;
+  const fresh = S.newComment?.file === file ? newCommentCard(S.newComment) : '';
+  const cards = mine.map((t) => threadCard(i, t)).join('');
+  const empty = !fresh && !cards && can ? '<p class="m-empty">Select text to comment <kbd>⌘⌥M</kbd></p>' : '';
+  return `<aside class="margin">${top()}${empty}<div class="threads" id="threads">${fresh}${cards}</div></aside>`;
+}
+
+// Resolved threads: what you asked, and what the worker did; newest first
+function resolvedList(done) {
+  return `<div class="r-list">${done
+    .slice()
+    .reverse()
+    .map((t) => {
+      const last = t.messages.at(-1);
+      return `<div class="r-item">
+        <div class="r-quote">${t.quote ? oneLine(t.quote) : '<i>Whole file</i>'}</div>
+        <div class="r-ask">${oneLine(t.messages[0].text)}</div>
+        ${last.author === 'claude' ? `<div class="r-ans">↳ ${oneLine(last.text)}</div>` : ''}
+        <button class="link" data-thread-reopen="${esc(t.id)}">Reopen</button>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
+// One slim line: the text, and a small round button that sends it (↵ does too; ⇧↵ is a new line, Esc lets go)
+const SEND_ICON = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+function composerBox(attrs, text, placeholder, button) {
+  return `<div class="t-composer${(text || '').trim() ? ' has-text' : ''}"><textarea rows="1" ${attrs} placeholder="${placeholder}">${esc(text || '')}</textarea>${button}</div>`;
+}
+
+function newCommentCard(n) {
+  return `<div class="thread active is-draft" data-id="new">
+    <div class="t-quote ${n.quote ? '' : 'whole'}">${n.quote ? oneLine(n.quote) : 'Whole file'}</div>
+    ${composerBox('id="new-comment" data-keep="new-comment"', S.newCommentText, 'Comment…', `<button class="t-send" data-new-add title="Add (↵)">${SEND_ICON}</button>`)}
+  </div>`;
+}
+
+// One status per thread, only when it says something: queued or being changed, or the worker asks
+function threadChip(i, t) {
+  if (t.pending) return `<span class="chip working">${i.working === 'refine' ? 'Changing' : 'Queued'}</span>`;
+  if (!threadHasDraft(t) && t.messages.at(-1).question) return '<span class="chip ask">Question</span>';
+  return '';
+}
+
+function messageView(t, m, active) {
+  const who = m.author === 'claude' ? 'Worker' : 'You';
+  const editing = active && S.editMsg === m.id;
+  const body = editing
+    ? composerBox(`data-edit-msg="${esc(m.id)}" data-thread="${esc(t.id)}" data-keep="edit-${esc(m.id)}"`, S.editMsgText ?? m.text, 'Empty deletes it', `<button class="t-send" data-edit-save="${esc(m.id)}" data-thread="${esc(t.id)}" title="Save (↵) · Esc cancels">${SEND_ICON}</button>`)
+    : `<div class="t-body">${esc(m.text)}</div>`;
+  const edit = active && m.draft && !editing ? `<button class="link t-edit" data-edit-start="${esc(m.id)}">Edit</button>` : '';
+  return `<div class="t-msg${m.draft ? ' draft' : ''}"><div class="t-head"><span class="name">${who}</span>${m.draft ? '<span class="t-draft">draft</span>' : ''}${edit}</div>${body}</div>`;
+}
+
+function threadCard(i, t) {
+  const active = S.activeThread === t.id;
+  const msgs = active || t.messages.length < 3 ? t.messages : [t.messages[0], t.messages.at(-1)];
+  const more = !active && t.messages.length > 2 ? `<div class="t-more">${t.messages.length - 2} more</div>` : '';
+  let controls = '';
+  if (active) {
+    const reply = t.pending
+      ? '<div class="t-wait">With the worker. Reply once it answers.</div>'
+      : composerBox(`data-reply="${esc(t.id)}" data-keep="reply-${esc(t.id)}"`, S.replyText[t.id], t.messages.at(-1).question ? 'Answer…' : 'Reply…', `<button class="t-send" data-thread-reply="${esc(t.id)}" title="Reply (↵)">${SEND_ICON}</button>`);
+    const acts = [
+      threadHasDraft(t) ? `<button class="link" data-thread-discard="${esc(t.id)}">${t.messages[0].draft ? 'Delete' : 'Discard draft'}</button>` : '',
+      !threadHasDraft(t) && !t.pending ? `<button class="link" data-thread-resolve="${esc(t.id)}">✓ Resolve</button>` : '',
+    ].join('');
+    controls = reply + (acts ? `<div class="t-actions">${acts}</div>` : '');
+  }
+  const chip = threadChip(i, t);
+  const cls = ['thread', active && 'active', threadHasDraft(t) && 'is-draft', !t.quote && 'page-level'].filter(Boolean).join(' ');
+  return `<div class="${cls}" data-id="${esc(t.id)}">
+    ${chip ? `<div class="t-status">${chip}</div>` : ''}
+    <div class="t-quote ${t.quote ? '' : 'whole'}">${t.quote ? oneLine(t.quote) : 'Whole file'}</div>
+    ${msgs.map((m) => messageView(t, m, active)).join('')}${more}${controls}</div>`;
+}
+
+// The document's text with whitespace dropped, each character mapped to its text node and offset, so a quote
+// matches however the selection broke its lines
+function textIndex(el) {
+  const chars = [];
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    const t = n.nodeValue;
+    for (let k = 0; k < t.length; k++) if (!/\s/.test(t[k])) chars.push([n, k]);
+  }
+  return { text: chars.map(([n, k]) => n.nodeValue[k]).join(''), chars };
+}
+
+function markQuote(art, quote, id, nth = 0) {
+  const needle = quote.replace(/\s+/g, '');
+  const { text, chars } = textIndex(art);
+  let at = needle ? text.indexOf(needle) : -1;
+  for (let k = 0, next = at; k < nth && next > -1; k++) if ((next = text.indexOf(needle, next + 1)) > -1) at = next;
+  if (at < 0) return false;
+  const [sn, so] = chars[at];
+  const [en, eo] = chars[at + needle.length - 1];
+  // One mark per text node, so the highlight never breaks the document's structure
+  const nodes = [];
+  const walk = document.createTreeWalker(art, NodeFilter.SHOW_TEXT);
+  let on = false;
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (n === sn) on = true;
+    if (on) nodes.push(n);
+    if (n === en) break;
+  }
+  for (const n of nodes) {
+    const from = n === sn ? so : 0;
+    const to = n === en ? eo + 1 : n.nodeValue.length;
+    if (!n.nodeValue.slice(from, to).trim()) continue;
+    const r = document.createRange();
+    r.setStart(n, from);
+    r.setEnd(n, to);
+    const m = document.createElement('mark');
+    m.className = `cm-hl${S.activeThread === id ? ' active' : ''}`;
+    m.dataset.comment = id;
+    r.surroundContents(m);
+  }
+  return true;
+}
+
+// Highlight each open thread's quote in the document (the occurrence you selected), and the comment being written
+function markComments() {
+  const art = $('#doc');
+  if (!art || !S.idea) return;
+  const file = art.dataset.file;
+  if (S.newComment?.file === file && S.newComment.quote) markQuote(art, S.newComment.quote, 'new', S.newComment.nth);
+  for (const t of openThreads(S.idea, file)) {
+    const anchored = t.quote && markQuote(art, t.quote, t.id, t.nth);
+    document.querySelector(`.thread[data-id="${CSS.escape(t.id)}"]`)?.classList.toggle('orphan', Boolean(t.quote) && !anchored);
+  }
+}
+
+// Place each card beside its highlight, pushing overlapping cards apart; the active card wins its spot.
+// Whole-file and detached threads stack at the top. On a narrow pane the margin sits below the document.
+function layoutThreads() {
+  const sheet = $('.sheet');
+  const box = $('#threads');
+  if (!sheet || !box) return;
+  const narrow = $('.ctx-doc').clientWidth < 880;
+  sheet.classList.toggle('narrow', narrow);
+  const cards = [...box.querySelectorAll('.thread')];
+  if (narrow) {
+    box.style.height = '';
+    for (const c of cards) c.style.top = '';
+    return;
+  }
+  const base = box.getBoundingClientRect().top;
+  const items = cards.map((card) => {
+    const id = card.dataset.id;
+    const mark = $(`#doc mark[data-comment="${CSS.escape(id)}"]`);
+    return { card, id, want: mark ? mark.getBoundingClientRect().top - base : 0, h: card.offsetHeight, pinned: !mark };
+  });
+  items.sort((a, b) => (a.pinned === b.pinned ? a.want - b.want : a.pinned ? -1 : 1));
+  const GAP = 8;
+  let y = 0;
+  for (const it of items) {
+    it.top = it.pinned ? y : Math.max(it.want, y);
+    y = it.top + it.h + GAP;
+  }
+  const ai = items.findIndex((it) => it.id === S.activeThread && !it.pinned);
+  if (ai > -1) {
+    const floor = items.filter((it) => it.pinned).reduce((m, it) => Math.max(m, it.top + it.h + GAP), 0);
+    items[ai].top = Math.max(items[ai].want, floor);
+    for (let k = ai + 1; k < items.length; k++) items[k].top = Math.max(items[k].want, items[k - 1].top + items[k - 1].h + GAP);
+    for (let k = ai - 1; k >= 0 && !items[k].pinned; k--) items[k].top = Math.max(floor, Math.min(items[k].want, items[k + 1].top - items[k].h - GAP));
+  }
+  // However the active card moved things, no two cards overlap
+  for (let k = 1; k < items.length; k++) items[k].top = Math.max(items[k].top, items[k - 1].top + items[k - 1].h + GAP);
+  for (const it of items) it.card.style.top = `${it.top}px`;
+  box.style.height = `${items.reduce((m, it) => Math.max(m, it.top + it.h), 0)}px`;
+}
+window.addEventListener('resize', () => layoutThreads());
+
+function growArea(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+}
+
+function setActiveThread(id) {
+  if (S.activeThread === id) return;
+  if (id !== 'new' && S.newComment && !(S.newCommentText || '').trim()) S.newComment = null; // an empty new comment goes
+  S.activeThread = id;
+  S.editMsg = S.editMsgText = null;
+  if (id) S.showResolved = false;
+  renderMain();
+  // Opening a thread puts you in its reply box
+  if (id && id !== 'new') document.querySelector(`[data-reply="${CSS.escape(id)}"]`)?.focus();
+}
+
+function startComment(quote, nth = 0) {
+  closeAsk();
+  S.newComment = { file: $('#doc').dataset.file, quote, nth };
+  S.newCommentText = '';
+  S.activeThread = 'new';
+  S.showResolved = false;
+  window.getSelection()?.removeAllRanges();
+  renderMain();
+  $('#new-comment')?.focus();
+}
+
+function cancelComment() {
+  S.newComment = S.newCommentText = null;
+  if (S.activeThread === 'new') S.activeThread = null;
+  renderMain();
+}
+
+// Add the comment as a draft, then get out of the way: you keep reading
+async function addComment() {
+  const text = (S.newCommentText || '').trim();
+  if (!text || !S.newComment) return;
+  await wsApi('POST', '/api/ideas/comments', { id: S.idea.id, file: S.newComment.file, quote: S.newComment.quote, nth: S.newComment.nth, text });
+  S.newComment = S.newCommentText = null;
+  S.activeThread = null;
+  return refreshIdea();
+}
+
+async function addReply(tid) {
+  const text = (S.replyText[tid] || '').trim();
+  if (!text) return;
+  await wsApi('POST', '/api/ideas/comments/reply', { id: S.idea.id, comment: tid, text });
+  delete S.replyText[tid];
+  S.activeThread = null;
+  return refreshIdea();
+}
+
+async function saveEdit(tid, mid) {
+  const text = (S.editMsgText ?? '').trim();
+  await wsApi('POST', '/api/ideas/comments/edit', { id: S.idea.id, comment: tid, message: mid, text });
+  S.editMsg = S.editMsgText = null;
+  return refreshIdea();
+}
+
+async function sendComments() {
+  if (!draftsIn(S.idea)) return;
+  const r = await wsApi('POST', '/api/ideas/comments/send', { id: S.idea.id });
+  toast(`Sent ${r.sent} comment${r.sent === 1 ? '' : 's'} to the worker${r.dropped ? ` (${r.dropped} on files that can't change any more were dropped)` : ''}`);
+  return refreshIdea();
+}
 
 function closeAsk() {
-  document.querySelectorAll('.ask-btn, .ask-pop').forEach((e) => e.remove());
+  document.querySelectorAll('.ask-btn').forEach((e) => e.remove());
 }
 
-function openAsk(quote, rect) {
-  closeAsk();
-  const pop = document.createElement('div');
-  pop.className = 'ask-pop';
-  pop.innerHTML = `${quote ? `<div class="quote">${esc(quote)}</div>` : '<div class="quote">Whole file</div>'}
-    <textarea class="field" placeholder="What should change? e.g. “Rename this to Signal”, “too vague, make it a rule”"></textarea>
-    <div class="row"><button class="btn ghost sm" data-act="cancel">Cancel</button><button class="btn primary sm" data-act="send">Ask ⌘↵</button></div>`;
-  document.body.append(pop);
-  const x = Math.min(Math.max(12, rect.left), innerWidth - 372);
-  const y = rect.bottom + 8 + 200 > innerHeight ? rect.top - 8 - pop.offsetHeight : rect.bottom + 8;
-  Object.assign(pop.style, { left: `${x}px`, top: `${Math.max(12, y)}px` });
-  const ta = $('textarea', pop);
-  ta.focus();
-  const send = async () => {
-    const text = ta.value.trim();
-    if (!text) return;
-    try {
-      await wsApi('POST', '/api/ideas/refine', { id: S.idea.id, file: $('#doc').dataset.file, quote, text });
-      closeAsk();
-      window.getSelection()?.removeAllRanges();
-      toast('Change requested');
-    } catch (err) {
-      fail(err);
-    }
-  };
-  pop.addEventListener('click', (e) => {
-    const act = e.target.dataset.act;
-    if (act === 'cancel') closeAsk();
-    if (act === 'send') send();
-  });
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-    if (e.key === 'Escape') closeAsk();
-  });
+// The selection in a document you can comment on, if any
+function commentableSelection() {
+  const sel = window.getSelection();
+  const doc = $('#doc');
+  if (!doc || !S.idea || !canRefineDoc(S.idea, doc.dataset.file) || !sel || sel.isCollapsed || !doc.contains(sel.anchorNode)) return null;
+  const quote = sel.toString().trim();
+  if (!quote) return null;
+  // Which occurrence of the text you selected, so a repeated phrase highlights where you meant it
+  const range = sel.getRangeAt(0);
+  const before = document.createRange();
+  before.setStart(doc, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().replace(/\s+/g, '').length;
+  const needle = quote.replace(/\s+/g, '');
+  const text = textIndex(doc).text;
+  let nth = 0;
+  for (let at = text.indexOf(needle), k = 0; at > -1 && at <= start; at = text.indexOf(needle, at + 1), k++) nth = k;
+  return { quote: quote.slice(0, 8000), nth, rect: range.getBoundingClientRect() };
 }
 
+// Select text: a small Comment button appears under it (or press ⌘⌥M)
 document.addEventListener('mouseup', (e) => {
-  if (e.target.closest('.ask-pop, .ask-btn')) return;
+  if (e.target.closest('.ask-btn, .margin')) return;
   setTimeout(() => {
-    const sel = window.getSelection();
-    const doc = $('#doc');
-    if (!doc || !S.idea || !canRefineDoc(S.idea, doc.dataset.file) || !sel || sel.isCollapsed || !doc.contains(sel.anchorNode)) {
-      if (!$('.ask-pop')) closeAsk();
-      return;
-    }
-    const quote = sel.toString().trim();
-    if (!quote) return;
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const at = commentableSelection();
     closeAsk();
+    if (!at) return;
     const b = document.createElement('button');
-    b.className = 'btn primary sm ask-btn';
-    b.textContent = 'Ask for a change';
-    Object.assign(b.style, { left: `${rect.left}px`, top: `${rect.bottom + 6}px` });
-    b.onclick = () => openAsk(quote.slice(0, 600), rect);
+    b.className = 'ask-btn';
+    b.innerHTML = 'Comment <kbd>⌘⌥M</kbd>';
+    Object.assign(b.style, { left: `${at.rect.left + at.rect.width / 2}px`, top: `${at.rect.bottom + 6}px` });
+    b.onclick = () => startComment(at.quote, at.nth);
     document.body.append(b);
   }, 0);
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('button, textarea, a, .r-list')) return;
+  const hl = e.target.closest('mark.cm-hl[data-comment]');
+  if (hl && window.getSelection().isCollapsed) return setActiveThread(hl.dataset.comment);
+  const card = e.target.closest('.thread[data-id]');
+  if (card) return setActiveThread(card.dataset.id);
+  // A click anywhere else (not a selection) lets the open thread go; a new comment you've written stays
+  if (!window.getSelection().isCollapsed || !S.activeThread) return;
+  if (S.activeThread === 'new') return (S.newCommentText || '').trim() ? null : cancelComment();
+  if (e.target.closest('#doc, .margin, .ctx-doc')) setActiveThread(null);
+});
+
+document.addEventListener('input', (e) => {
+  const ta = e.target;
+  if (ta.id === 'new-comment') S.newCommentText = ta.value;
+  else if (ta.dataset?.reply) S.replyText[ta.dataset.reply] = ta.value;
+  else if (ta.dataset?.editMsg) S.editMsgText = ta.value;
+  else return;
+  ta.closest('.t-composer')?.classList.toggle('has-text', Boolean(ta.value.trim()));
+  growArea(ta);
+  layoutThreads();
+});
+
+document.addEventListener('keydown', (e) => {
+  const ta = e.target;
+  // ⌘⌥M: comment on the selection
+  if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyM') {
+    const at = commentableSelection();
+    if (at) return (e.preventDefault(), startComment(at.quote, at.nth));
+  }
+  // ⌘⇧↵: add what's in the box you're in, then send the batch
+  if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    const add = ta.id === 'new-comment' ? addComment() : ta.dataset?.reply ? addReply(ta.dataset.reply) : Promise.resolve();
+    return add.then(sendComments).catch(fail);
+  }
+  if (!ta.closest?.('.margin')) return;
+  // In a comment box: ↵ adds, ⇧↵ is a new line, Esc lets go
+  const enter = e.key === 'Enter' && !e.shiftKey && !e.isComposing;
+  if (ta.id === 'new-comment') {
+    if (enter) return (e.preventDefault(), addComment().catch(fail));
+    if (e.key === 'Escape') return cancelComment();
+  }
+  if (ta.dataset?.reply) {
+    if (enter) return (e.preventDefault(), addReply(ta.dataset.reply).catch(fail));
+    if (e.key === 'Escape') return setActiveThread(null);
+  }
+  if (ta.dataset?.editMsg) {
+    if (enter) return (e.preventDefault(), saveEdit(ta.dataset.thread, ta.dataset.editMsg).catch(fail));
+    if (e.key === 'Escape') return ((S.editMsg = S.editMsgText = null), renderMain());
+  }
 });
 
 // ---------- Actions ----------
@@ -1225,10 +1553,11 @@ async function refreshIdea() {
   await loadIdea();
   // A change that just landed: say so once, instead of keeping a list of finished requests
   if (S.idea && S.idea.id === sameIdea) {
-    for (const r of S.idea.refinements) {
-      if (was.get(r.id) !== 'pending' || r.status === 'pending') continue;
-      toast(r.status === 'asked' ? `The worker has a question about ${r.file}` : `✓ ${r.file}: ${r.reply}`, 6000);
-    }
+    const landed = S.idea.refinements.filter((r) => was.get(r.id) === 'pending' && r.status !== 'pending');
+    const asked = landed.filter((r) => r.status === 'asked').length;
+    const done = landed.length - asked;
+    if (landed.length === 1) toast(asked ? `The worker has a question about ${landed[0].file}` : `✓ ${landed[0].file}: ${landed[0].reply}`, 6000);
+    else if (landed.length) toast(`✓ ${done} comment${done === 1 ? '' : 's'} done${asked ? ` · ${asked} question${asked === 1 ? '' : 's'} for you` : ''}`, 6000);
   }
   renderMain();
 }
@@ -1343,6 +1672,43 @@ document.addEventListener('click', async (e) => {
       await wsApi('POST', '/api/ideas/reviewed', { id: S.idea.id, file: t.dataset.reviewed });
       return refreshIdea();
     }
+    if (t.dataset.newAdd !== undefined) return addComment();
+    if (t.dataset.newCancel !== undefined) return cancelComment();
+    if (t.dataset.threadReply) return addReply(t.dataset.threadReply);
+    if (t.dataset.threadDiscard) {
+      const th = commentsOn(S.idea).find((x) => x.id === t.dataset.threadDiscard);
+      if (th?.messages[0].draft) S.activeThread = null;
+      await wsApi('POST', '/api/ideas/comments/discard', { id: S.idea.id, comment: t.dataset.threadDiscard });
+      return refreshIdea();
+    }
+    if (t.dataset.threadResolve) {
+      await wsApi('POST', '/api/ideas/comments/resolve', { id: S.idea.id, comment: t.dataset.threadResolve });
+      S.activeThread = null;
+      return refreshIdea();
+    }
+    if (t.dataset.marginView) {
+      S.showResolved = t.dataset.marginView === 'resolved';
+      return renderMain();
+    }
+    if (t.dataset.threadReopen) {
+      await wsApi('POST', '/api/ideas/comments/resolve', { id: S.idea.id, comment: t.dataset.threadReopen, resolved: false });
+      S.activeThread = t.dataset.threadReopen;
+      S.showResolved = false;
+      return refreshIdea();
+    }
+    if (t.dataset.editStart) {
+      S.editMsg = t.dataset.editStart;
+      S.editMsgText = null;
+      renderMain();
+      const ta = $('[data-edit-msg]');
+      ta?.focus();
+      return ta?.setSelectionRange(ta.value.length, ta.value.length);
+    }
+    if (t.dataset.editSave) return saveEdit(t.dataset.thread, t.dataset.editSave);
+    if (t.dataset.editCancel !== undefined) {
+      S.editMsg = S.editMsgText = null;
+      return renderMain();
+    }
     if (t.dataset.dismiss) {
       await wsApi('POST', '/api/ideas/refine/dismiss', { id: S.idea.id, refinement: t.dataset.dismiss });
       return refreshIdea();
@@ -1392,7 +1758,16 @@ document.addEventListener('click', async (e) => {
         return refreshIdea();
       }
       case 'ask-file':
-        return openAsk(null, t.getBoundingClientRect());
+        return startComment(null);
+      case 'send-comments':
+        return sendComments();
+
+      case 'discard-comments': {
+        const n = draftsIn(S.idea);
+        if (!confirm(`Discard ${n} draft${n === 1 ? '' : 's'}?`)) return;
+        await wsApi('POST', '/api/ideas/comments/discard', { id: S.idea.id });
+        return refreshIdea();
+      }
       case 'plan-prds':
         await wsApi('POST', '/api/prds/plan', { id: S.idea.id, guidance: $('#prd-guidance')?.value.trim() });
         S.route.file = null;
@@ -1462,7 +1837,9 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'new-project') {
     S.newProject = e.target.value;
     const b = $('#create-project');
-    if (b) b.disabled = !e.target.value.trim();
+    if (b) b.disabled = !projectSlug(e.target.value);
+    const where = $('#np-where');
+    if (where) where.innerHTML = projectWhere();
   }
   if (e.target.id === 'ask-text') {
     S.ask = e.target.value;

@@ -25,7 +25,7 @@
 //   panel    you spoke last in a meeting       -> the panel (CEO, PM, Architect) answers
 //   distill  a distill step is queued          -> the worker writes that step's files
 //   prd      you asked for PRDs                 -> the worker cuts the context into PRDs
-//   refine   you asked for a change in a file  -> the worker edits it (context file or PRD)
+//   refine   you sent a batch of comments      -> the worker edits the files (context files or PRDs)
 //
 // Managed projects (repos Signals creates in the hub folder, HUB_DIR: ~/signals_workspace by default; vibe or dev)
 // share one worker instead: /signals run in HUB_DIR is the hub, polling GET /api/hub/jobs/next for the next job in
@@ -366,13 +366,14 @@ function makeWorkspace(id, repo) {
     if (idea.stage === 'distilling' && idea.distill?.status === 'queued') return { type: 'distill', at: idea.distill.at };
     if (idea.stage === 'distilled' && idea.prd?.status === 'queued') return { type: 'prd', at: idea.prd.at };
     {
-      const r = idea.refinements.find((x) => x.status === 'pending' && canRefineDoc(idea, x.file));
-      if (r) return { type: 'refine', at: r.at, refinement: r.id };
+      // One refine job takes every change request waiting, so the worker edits with all of them in view
+      const rs = idea.refinements.filter((x) => x.status === 'pending' && canRefineDoc(idea, x.file));
+      if (rs.length) return { type: 'refine', at: rs[0].at, refinements: rs.map((r) => r.id) };
     }
     return null;
   }
 
-  let job = null; // { id, type, idea, refinement?, claimed_at }
+  let job = null; // { id, type, idea, refinements?, claimed_at }
   let worker = null; // { session, at }: a worker Signals started in the background, if any
   let waiters = [];
   let lastClaudeActivity = 0;
@@ -405,7 +406,7 @@ function makeWorkspace(id, repo) {
       .sort((a, b) => Date.parse(a.need.at) - Date.parse(b.need.at));
     if (!pending.length) return null;
     const { idea, need } = pending[0];
-    job = { id: shortId(), type: need.type, idea: idea.id, refinement: need.refinement, claimed_at: now(), claimed_ms: Date.now() };
+    job = { id: shortId(), type: need.type, idea: idea.id, refinements: need.refinements, claimed_at: now(), claimed_ms: Date.now() };
     // Before the worker changes files you've seen, remember them as you last reviewed them (a refine can ripple)
     const touches = { refine: [...CONTEXT_FILES, ...prdNames()], distill: idea.distill && stepOf(idea.distill.step)?.files, prd: prdNames() };
     rememberReviewed(touches[need.type] || []);
@@ -418,6 +419,7 @@ function makeWorkspace(id, repo) {
   // Several changes accumulate against the same baseline until you approve the stage or mark the file reviewed.
 
   const reviewed = new Map(); // file name -> content as last reviewed
+
   function rememberReviewed(files) {
     for (const f of files) {
       if (reviewed.has(f)) continue;
@@ -429,6 +431,30 @@ function makeWorkspace(id, repo) {
   function forgetReviewed(files) {
     for (const f of files) reviewed.delete(f);
   }
+
+  // ---------- Comment threads, in memory only (like reviewed) ----------
+  // You comment on context files and PRDs as you read. A comment and its replies are a thread; what you write is
+  // a draft, invisible to the worker, until you send the batch. Sending turns each thread with drafts into one
+  // change request, and the worker takes them all in one job. Its answer (done, or a question) lands back in
+  // the thread, where you can reply again.
+
+  // A thread the worker has done, or that you resolved, leaves the margin (resolved), but stays to look back on.
+  const threads = new Map(); // idea id -> [{ id, file, quote, nth, at, refinement, resolved, messages: [{ id, author, text, at, draft, question }] }]
+  const threadsOf = (idea) => threads.get(idea.id) || [];
+  const hasDraft = (t) => t.messages.some((m) => m.draft);
+  const draftCount = (idea, files) => threadsOf(idea).filter((t) => !files || files.includes(t.file)).reduce((n, t) => n + t.messages.filter((m) => m.draft).length, 0);
+  function findThread(idea, tid) {
+    const t = threadsOf(idea).find((x) => x.id === tid);
+    if (!t) throw httpError(404, `No comment thread ${tid}`);
+    return t;
+  }
+  function keepThreads(idea, keep) {
+    const left = threadsOf(idea).filter((t) => t.messages.length && keep(t));
+    if (left.length) threads.set(idea.id, left);
+    else threads.delete(idea.id);
+  }
+  // A thread is waiting on the worker while its change request is pending
+  const threadPending = (idea, t) => Boolean(t.refinement && idea.refinements.some((r) => r.id === t.refinement && r.status === 'pending'));
 
   function transcript(m) {
     return m.messages.map((m) => ({ author: m.author === 'you' ? 'user' : 'panel', text: m.text }));
@@ -508,16 +534,22 @@ function makeWorkspace(id, repo) {
         },
       };
     }
-    const r = idea.refinements.find((x) => x.id === j.refinement);
+    const rs = j.refinements.map((rid) => idea.refinements.find((x) => x.id === rid)).filter(Boolean);
     return {
       job: {
         ...base,
-        file: docFile(r.file),
-        kind: isPrd(r.file) ? 'prd' : 'context',
         context_dir: contextDir(idea.id),
         prds_dir: prdDir(),
-        highlighted_text: r.quote || null,
-        request: r.text,
+        // Every comment in the batch, in the order you wrote them
+        requests: rs.map((r) => ({
+          id: r.id,
+          file: docFile(r.file),
+          kind: isPrd(r.file) ? 'prd' : 'context',
+          highlighted_text: r.quote || null,
+          request: r.text,
+          // A reply in a thread: what was said before it (your earlier comments, the worker's answers)
+          ...(r.history?.length && { thread: r.history }),
+        })),
       },
     };
   }
@@ -573,7 +605,7 @@ function makeWorkspace(id, repo) {
     claudeActed();
   }
 
-  async function completeJob(j, text, question = false, log = null) {
+  async function completeJob(j, text, question = false, log = null, questions = null, replies = null) {
     const idea = getIdea(j.idea);
     const reply = String(text || '').trim();
     if (j.type === 'panel') {
@@ -607,9 +639,24 @@ function makeWorkspace(id, repo) {
       for (const n of prdNames()) origin[n] ||= idea.prd.meeting || cur(idea).id;
       Object.assign(idea.prd, { status: 'review', note: reply || null, at: now(), basis: contextHash(contextNow()), updated: j.mode === 'update', added });
     } else {
-      // A request the worker couldn't act on comes back as a question, which stays visible until dismissed
-      const r = idea.refinements.find((x) => x.id === j.refinement);
-      if (r) Object.assign(r, { status: question ? 'asked' : 'done', reply: reply || 'Done.', done_at: now() });
+      // A request the worker couldn't act on comes back as a question, which stays visible until dismissed.
+      // questions: { <request id>: "question" } for the ones it asks about; the rest are done.
+      // replies: { <request id>: "what changed" }, its answer per comment (else the summary, text).
+      const asks = questions && typeof questions === 'object' ? questions : {};
+      const says = replies && typeof replies === 'object' ? replies : {};
+      for (const rid of j.refinements || []) {
+        const r = idea.refinements.find((x) => x.id === rid);
+        if (!r) continue;
+        const q = String(asks[rid] || '').trim();
+        if (q) Object.assign(r, { status: 'asked', reply: q, done_at: now() });
+        else Object.assign(r, { status: question ? 'asked' : 'done', reply: String(says[rid] || '').trim() || reply || 'Done.', done_at: now() });
+        // The answer lands in its thread, so you can reply to it
+        const t = r.thread && threadsOf(idea).find((x) => x.id === r.thread);
+        if (t) {
+          t.messages.push({ id: shortId(), author: 'claude', text: r.reply, at: now(), question: r.status === 'asked' });
+          t.resolved = r.status === 'done' && !hasDraft(t); // done: out of the way; a question stays open for your answer
+        }
+      }
     }
     endJob();
     await save(idea);
@@ -737,7 +784,7 @@ End with a short summary: what you built and how to try it.`;
       // The PRDs were cut from context that has changed since (a re-distill or a change request)
       const prd_stale = Boolean(prds.length && idea.prd?.basis && ['review', 'done'].includes(idea.prd.status) && idea.prd.basis !== contextHash(contextNow()));
       const log = await readFile(LOG_FILE, 'utf8').catch(() => null);
-      return { ...idea, ...summary(idea), context, prds, changes, prd_stale, log };
+      return { ...idea, ...summary(idea), context, prds, changes, prd_stale, log, comments: threadsOf(idea).map((t) => ({ ...t, pending: threadPending(idea, t) })) };
     },
 
     // You've looked at the changes: stop highlighting them (one file, or all)
@@ -837,9 +884,11 @@ End with a short summary: what you built and how to try it.`;
     'POST /api/ideas/approve': async (_q, b) => {
       const idea = getIdea(b.id);
       if (!reviewing(idea)) throw httpError(409, 'Nothing is waiting for your review.');
+      if (draftCount(idea)) throw httpError(409, 'Send or discard your draft comments first.');
       if (job?.idea === idea.id || idea.refinements.some((r) => r.status === 'pending')) throw httpError(409, 'Changes you asked for are still being made. Approve once they land.');
       const n = DISTILL_STEPS.findIndex((x) => x.id === idea.distill.step);
       clearRefinements(idea, DISTILL_STEPS[n].files);
+      keepThreads(idea, (t) => !DISTILL_STEPS[n].files.includes(t.file));
       forgetReviewed(DISTILL_STEPS[n].files);
       (idea.distill.approved ||= []).push(idea.distill.step);
       if (n === DISTILL_STEPS.length - 1) {
@@ -893,19 +942,99 @@ End with a short summary: what you built and how to try it.`;
       return summary(idea);
     },
 
-    // Ask for a change to one context file, optionally anchored to a quote
-    'POST /api/ideas/refine': async (_q, b) => {
+    // A new thread: a draft comment on a quote, or on the whole file (no quote)
+    'POST /api/ideas/comments': async (_q, b) => {
       const idea = getIdea(b.id);
       const abs = docFile(b.file);
       const name = docName(abs);
       if (isPrd(name) && prdLocked(idea, name)) throw httpError(409, 'This PRD has been executed: it stays as it is. Ask for a follow-up PRD instead.');
       if (!canRefineDoc(idea, name)) throw httpError(409, isPrd(name) ? 'PRDs can be changed once they are written.' : 'Context files can be changed while a step is under review, or once the idea is distilled.');
       if (!fs.existsSync(abs)) throw httpError(404, `No file ${b.file}`);
-      const r = { id: shortId(), file: name, quote: String(b.quote || '').trim() || null, text: userText(b), status: 'pending', at: now() };
-      idea.refinements.push(r);
+      const t = {
+        id: shortId(),
+        file: name,
+        quote: String(b.quote || '').trim().slice(0, 8000) || null,
+        nth: Number.isInteger(b.nth) && b.nth > 0 ? b.nth : 0, // which occurrence of the quote you selected
+        at: now(),
+        refinement: null,
+        messages: [{ id: shortId(), author: 'you', text: userText(b), at: now(), draft: true }],
+      };
+      threads.set(idea.id, [...threadsOf(idea), t]);
+      broadcast('idea_changed', { idea: idea.id });
+      return t;
+    },
+    // A draft reply in a thread (to the worker's answer or question, or to add to your own comment)
+    'POST /api/ideas/comments/reply': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const t = findThread(idea, b.comment);
+      if (threadPending(idea, t)) throw httpError(409, 'The worker has this comment. Reply once it answers.');
+      t.messages.push({ id: shortId(), author: 'you', text: userText(b), at: now(), draft: true });
+      t.resolved = false; // a reply reopens it
+      broadcast('idea_changed', { idea: idea.id });
+      return { ok: true };
+    },
+    // Edit a draft message; emptied, it goes (and a thread left empty goes with it)
+    'POST /api/ideas/comments/edit': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const t = findThread(idea, b.comment);
+      const m = t.messages.find((x) => x.id === b.message);
+      if (!m?.draft) throw httpError(409, 'Only a draft can be edited.');
+      const text = String(b.text || '').trim();
+      if (text) m.text = text;
+      else t.messages = t.messages.filter((x) => x !== m);
+      keepThreads(idea, () => true);
+      broadcast('idea_changed', { idea: idea.id });
+      return { ok: true };
+    },
+    // Discard drafts: one thread's, or all of them (no comment id). A thread left empty goes.
+    'POST /api/ideas/comments/discard': async (_q, b) => {
+      const idea = getIdea(b.id);
+      for (const t of b.comment ? [findThread(idea, b.comment)] : threadsOf(idea)) t.messages = t.messages.filter((m) => !m.draft);
+      keepThreads(idea, () => true);
+      broadcast('idea_changed', { idea: idea.id });
+      return { ok: true };
+    },
+    // Resolve (or reopen): a resolved thread leaves the margin; you can still find it among the resolved
+    'POST /api/ideas/comments/resolve': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const t = findThread(idea, b.comment);
+      const on = b.resolved !== false;
+      if (on && threadPending(idea, t)) throw httpError(409, 'The worker has this comment. Resolve it once it answers.');
+      if (on && hasDraft(t)) throw httpError(409, 'Send or discard the draft in this thread first.');
+      t.resolved = on;
+      // A question you resolve instead of answering is closed
+      const before = idea.refinements.length;
+      if (on) idea.refinements = idea.refinements.filter((r) => !(r.thread === t.id && r.status === 'asked'));
+      if (idea.refinements.length !== before) await save(idea);
+      else broadcast('idea_changed', { idea: idea.id });
+      return { ok: true };
+    },
+    // Send the batch: each thread with drafts becomes one change request, and the worker takes them all in one job
+    'POST /api/ideas/comments/send': async (_q, b) => {
+      const idea = getIdea(b.id);
+      const all = threadsOf(idea).filter(hasDraft);
+      if (!all.length) throw httpError(409, 'No draft comments to send.');
+      // A file that can no longer be changed (approved away, executed, removed) drops its drafts
+      const ok = all.filter((t) => canRefineDoc(idea, t.file) && fs.existsSync(docFile(t.file)));
+      for (const t of all) {
+        const sent = t.messages.filter((m) => !m.draft);
+        const mine = t.messages.filter((m) => m.draft);
+        if (!ok.includes(t)) {
+          t.messages = sent;
+          continue;
+        }
+        // The thread's earlier request (answered by now) gives way to this one
+        idea.refinements = idea.refinements.filter((r) => r.thread !== t.id);
+        const r = { id: shortId(), thread: t.id, file: t.file, quote: t.quote, text: mine.map((m) => m.text).join('\n\n'), status: 'pending', at: now() };
+        if (sent.length) r.history = sent.map((m) => ({ author: m.author === 'you' ? 'user' : 'worker', text: m.text }));
+        idea.refinements.push(r);
+        t.refinement = r.id;
+        for (const m of mine) delete m.draft;
+      }
+      keepThreads(idea, () => true);
       await save(idea);
       wake();
-      return r;
+      return { sent: ok.length, dropped: all.length - ok.length };
     },
 
     // Close a question the worker asked about a change request
@@ -941,8 +1070,10 @@ End with a short summary: what you built and how to try it.`;
     'POST /api/prds/approve': async (_q, b) => {
       const idea = getIdea(b.id);
       if (!reviewingPrds(idea)) throw httpError(409, 'No PRDs are waiting for your review.');
+      if (draftCount(idea, prdNames())) throw httpError(409, 'Send or discard your draft comments on the PRDs first.');
       if (job?.idea === idea.id || idea.refinements.some((r) => r.status === 'pending' && isPrd(r.file))) throw httpError(409, 'Changes you asked for are still being made. Approve once they land.');
       clearRefinements(idea, prdNames());
+      keepThreads(idea, (t) => !isPrd(t.file));
       forgetReviewed(prdNames());
       Object.assign(idea.prd, { status: 'done', approved_at: now() });
       delete idea.prd.added;
@@ -1023,6 +1154,7 @@ End with a short summary: what you built and how to try it.`;
       await rm(docFile(name));
       forgetReviewed([name]);
       idea.refinements = idea.refinements.filter((r) => r.file !== name);
+      keepThreads(idea, (t) => t.file !== name);
       if (idea.handoffs) delete idea.handoffs[name];
       if (idea.executions) delete idea.executions[name];
       if (idea.prd_origin) delete idea.prd_origin[name];
@@ -1069,6 +1201,7 @@ End with a short summary: what you built and how to try it.`;
       const idea = getIdea(b.id);
       if (job?.idea === idea.id) throw httpError(409, 'Claude is working on this idea. Wait for it first.');
       ideas.delete(idea.id);
+      threads.delete(idea.id);
       forgetReviewed([...CONTEXT_FILES, ...prdNames()]);
       await rm(IDEA_FILE, { force: true });
       await rm(contextDir(), { recursive: true, force: true });
@@ -1081,7 +1214,7 @@ End with a short summary: what you built and how to try it.`;
     'GET /api/jobs/next': async (q, _b, signal) => nextJob(Number(q.get('timeout') ?? 300), signal),
     'GET /api/jobs/current': async () => (job ? jobView(job) : { job: null }),
     'POST /api/jobs/complete': async (_q, b) => {
-      await completeJob(currentJob(b.job_id), b.text, Boolean(b.question), b.log);
+      await completeJob(currentJob(b.job_id), b.text, Boolean(b.question), b.log, b.questions, b.replies);
       return { ok: true };
     },
     'POST /api/jobs/release': async (_q, b) => {
