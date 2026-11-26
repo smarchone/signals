@@ -8,6 +8,8 @@ An agent skill that keeps the **executive decisions** of a project (CEO, PM, Arc
 - Conflicts surfaced, never auto-resolved
 - Batch review for plans, interactive review while building
 
+Why: [Steer decisions, not prompts](https://smarchone.github.io/signals/blog.html).
+
 ## Usage
 
 Say you're adding password reset. Before you start, get the decisions it touches:

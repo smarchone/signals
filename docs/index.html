@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <title>signals · steer decisions, not prompts</title>
   <meta name="description" content="Steer decisions, not prompts. A skill that keeps your project's executive decisions in markdown, owned by a CEO, PM and Architect. Your agent asks before choosing; you approve every call." />
   <!-- Google Analytics (same property as smarchone.github.io/skills) -->
@@ -21,7 +22,7 @@
       --mono:ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       --sans:ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
       /* Space between sections: roomy on tall screens, tight enough on short ones that the footer stays in view. */
-      --gap:clamp(16px, calc((100svh - 580px) / 6.3), 36px);   /* 6.3 gaps in total; ~560px of content + 20px slack */
+      --gap:clamp(16px, calc((100svh - 730px) / 7.3), 36px);   /* 7.3 gaps; ~710px of content + 20px slack */
       color-scheme:dark;
     }
     * { box-sizing:border-box; }
@@ -36,7 +37,7 @@
     br.m { display:none; }
     h1 a { color:inherit; text-decoration:none; }
     h1 a:hover span { text-decoration:underline; text-underline-offset:3px; }
-    .top { display:flex; align-items:flex-start; gap:20px; }
+    .top { display:flex; align-items:flex-start; gap:36px; }
     .top .hero { flex:0 1 auto; min-width:0; }   /* icon sits at the right edge of the content column */
     .repo { flex:none; margin-top:6px; color:var(--dim); transition:color .15s; }
     .repo:hover { color:var(--white); }
@@ -52,8 +53,15 @@
     .lbl { font:11px/1 var(--mono); color:var(--accent); text-transform:uppercase; letter-spacing:.1em; }
     .problem { margin:0 0 var(--gap); }
     .problem ul { list-style:none; padding:0; margin:8px 0 0; }
-    .problem li { margin:0; padding-left:20px; position:relative; line-height:1.7; }
+    .problem li { margin:0; padding-left:20px; position:relative; line-height:1.7; text-wrap:pretty; }
     .problem li::before { content:"×"; position:absolute; left:0; color:var(--faint); }
+    .problem li.yes::before { content:"→"; color:var(--accent); }
+    .problem li.yes { color:var(--white); }
+    .problem li b { font-weight:600; color:var(--white); }
+    .problem li .d { color:var(--dim); }
+    .ph { display:flex; justify-content:space-between; align-items:baseline; }
+    .problem .thesis { font:12px/1 var(--mono); color:var(--dim); text-decoration:none; }
+    .problem .thesis:hover { color:var(--accent); }
 
     .pitch { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:28px; margin:0 0 calc(var(--gap) * .7); }
     .pitch div { min-width:0; }
@@ -90,6 +98,12 @@
     .hint .heart { color:#ff5c7a; }
     .hint .gh { display:inline-flex; align-items:center; gap:6px; vertical-align:middle; }
     .hint .gh svg { width:14px; height:14px; fill:currentColor; }
+
+    /* short laptop screens: drop the pitch columns so the footer stays in view */
+    @media (min-width:601px) and (max-height:859px) {
+      :root { --gap:clamp(16px, calc((100svh - 620px) / 6.6), 36px); }   /* 6.6 gaps; ~600px of content */
+      .pitch { display:none; }
+    }
 
     @media (max-width:600px) {
       body { padding-top:28px; }
@@ -130,6 +144,16 @@
       <li>The code keeps the what. The why gets lost in sessions, prompts and stale specs.</li>
       <li>Agents either run wild or get micromanaged, and that eats your attention.</li>
       <li>No shared mental model of what's decided, for you, your team or your agent.</li>
+    </ul>
+  </div>
+
+  <div class="problem steer">
+    <div class="ph"><span class="lbl">What are you steering?</span><a class="thesis" href="blog.html">know more →</a></div>
+    <ul>
+      <li><b>Sessions</b> <span class="d">→</span> none of them knows what the others decided.</li>
+      <li><b>Prompts</b> <span class="d">→</span> you re-steer the same calls, or micromanage every step.</li>
+      <li><b>Specs</b> <span class="d">→</span> stale by build two. The why gets lost. Back to prompting.</li>
+      <li class="yes"><b>Decisions</b> <span class="d">→</span> signals. One shared model of what's decided, steering every build.</li>
     </ul>
   </div>
 

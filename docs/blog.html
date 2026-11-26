@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steer decisions, not prompts</title>
+<meta name="description" content="Why coding agents should be steered by decisions instead of prompts, and how signals does it with a CEO, PM and Architect.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="claude:viewport-fit-sides" content="cover">
+<!-- Google Analytics (same property as smarchone.github.io/skills) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-ZZCV0RCPVZ"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-ZZCV0RCPVZ');
+</script>
+<style>
+:root {
+  --bg: #F2F4F7;
+  --surface: #FFFFFF;
+  --fg: #141C28;
+  --muted: #5B6676;
+  --rule: #D6DCE5;
+  --human: #2F43C9;
+  --human-soft: #E3E7FB;
+  --agent: #0B8574;
+  --agent-soft: #DDF2EE;
+  --warn: #C8412F;
+  --warn-soft: #F9E1DD;
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --display: var(--sans);
+  --body: var(--sans);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E131A; --surface: #161D27; --fg: #E5EBF2; --muted: #93A0B2; --rule: #2A3442;
+    --human: #8D9BFF; --human-soft: #1E2550; --agent: #3CC4AF; --agent-soft: #0F2E2A;
+    --warn: #FF7B67; --warn-soft: #3A1B17; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E131A; --surface: #161D27; --fg: #E5EBF2; --muted: #93A0B2; --rule: #2A3442;
+  --human: #8D9BFF; --human-soft: #1E2550; --agent: #3CC4AF; --agent-soft: #0F2E2A;
+  --warn: #FF7B67; --warn-soft: #3A1B17; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg); color: var(--fg);
+  font-family: var(--body); font-size: 15.8px; line-height: 1.65; -webkit-font-smoothing: antialiased;
+  padding-left: max(14.4px, env(safe-area-inset-left, 0px));
+  padding-right: max(14.4px, env(safe-area-inset-right, 0px));
+  padding-block: 50.4px 86.4px;
+}
+main { max-width: 774px; margin: 0 auto; display: grid; gap: 25.2px; }
+.col { max-width: 66ch; width: 100%; margin: 0 auto; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.08; margin: 0; }
+h1 { font-size: clamp(36px, 8vw, 64.8px); font-weight: 700; letter-spacing: -0.035em; }
+h1 .h { color: var(--human); } h1 .a { color: var(--agent); }
+h2 { font-size: clamp(21.6px, 4vw, 27px); font-weight: 700; letter-spacing: -0.025em; margin: 25.2px 0 12.6px; }
+p { margin: 0 0 1em; }
+.eyebrow { font-family: var(--mono); font-size: 11.2px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.dek { font-size: 18px; line-height: 1.45; color: var(--muted); margin-top: 16.2px; letter-spacing: -0.01em; }
+.aside { font-family: var(--mono); font-size: 11.7px; color: var(--muted); }
+a { color: var(--human); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--human); outline-offset: 3px; }
+strong { font-weight: 600; }
+code { font-family: var(--mono); font-size: 0.8em; }
+.pull {
+  font-family: var(--display); font-weight: 700; font-size: clamp(19.8px, 3.4vw, 26.1px);
+  line-height: 1.22; letter-spacing: -0.025em; margin: 7.2px 0 16.2px; text-wrap: balance;
+}
+.pull .h { color: var(--human); } .pull .a { color: var(--agent); }
+
+figure { margin: 0; }
+.gifcard { background: var(--surface); border: 1px solid var(--rule); border-radius: 12.6px; padding: 18px; display: grid; gap: 12.6px; }
+figcaption { font-family: var(--mono); font-size: 11.7px; color: var(--muted); line-height: 1.5; }
+.svgwrap { overflow-x: auto; }
+.svgwrap svg { display: block; width: 100%; min-width: 486px; height: auto; }
+.map { display: grid; gap: 9px; }
+
+.versus { display: grid; grid-template-columns: 1fr 1fr; gap: 12.6px; }
+.card { border: 1px solid var(--rule); border-radius: 10.8px; padding: 14.4px 16.2px; background: var(--surface); min-width: 0; }
+.card .eyebrow { margin-bottom: 7.2px; }
+.card.prompt .eyebrow { color: var(--warn); }
+.card.decision .eyebrow { color: var(--agent); }
+.card pre { margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12.2px; line-height: 1.6; }
+.card pre .k { color: var(--muted); }
+.map svg text { font-family: var(--mono); }
+.map svg text.t { font-family: var(--sans); font-weight: 700; letter-spacing: -0.01em; }
+.map .narrow { display: none; }
+@media (max-width: 620px) {
+  .versus { grid-template-columns: 1fr; }
+  body { font-size: 15.3px; }
+  .rules li { grid-template-columns: 1fr; gap: 2px; }
+  .gifcard { margin-inline: -7.2px; padding: 9px; border-radius: 10.8px; }
+  .map .wide { display: none; }
+  .map .narrow { display: block; }
+  .map .narrow svg { min-width: 0; max-width: 378px; margin: 0 auto; }
+}
+
+.rules { list-style: none; padding: 0; margin: 0 0 1em; display: grid; gap: 10.8px; }
+.rules li { display: grid; grid-template-columns: 97.2px 1fr; gap: 12.6px; align-items: baseline; }
+.rules .who { font-family: var(--mono); font-size: 11.2px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.rules .who.h { color: var(--human); } .rules .who.a { color: var(--agent); } .rules .who.w { color: var(--warn); }
+
+.term { font-family: var(--mono); font-size: 12.6px; line-height: 1.7; margin: 0 0 1em; padding: 3.6px 0 3.6px 16.2px; border-left: 2px solid var(--rule); white-space: pre; overflow-x: auto; }
+.term .c { color: var(--muted); }
+.term .o { color: var(--human); }
+.flow { font-family: var(--mono); font-size: 12.6px; color: var(--muted); margin: 0 0 1em; }
+.flow b { color: var(--fg); font-weight: 600; }
+.flow b.h { color: var(--human); } .flow b.a { color: var(--agent); }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 21.6px 0; }
+</style>
+
+<main>
+  <header class="col">
+    <div class="eyebrow">Notes on working with agents · signals</div>
+    <h1>Steer <span class="h">decisions</span>,<br>not <span class="a">prompts</span>.</h1>
+    <p class="dek">If you're stuck steering coding agents one prompt at a time, what should you steer them with instead? And what does a tool built on the answer look like?</p>
+  </header>
+
+  <section class="col">
+    <p>Steering an agent looks like a prompting problem. So we write longer prompts, then specs, then a context file that grows every week. It works for a day. Then a new session starts and you say it all again: SQLite, ISO dates, no lodash. The agent builds, and forgets whichever one you left out.</p>
+    <p class="pull">Steer with prompts and you steer procedures forever.<br>Steer <span class="h">decisions</span>, and agents steer the <span class="a">procedures</span>.</p>
+  </section>
+
+  <figure class="gifcard" aria-labelledby="gif-cap">
+    <picture><source media="(max-width: 620px)" srcset="steer-decisions-mobile.gif" width="600" height="1360"><img src="steer-decisions.gif" width="1200" height="680" alt="Animated diagram, two panels running on the same clock. Each panel has three columns, you, a middle layer and the agent, and six builds stack upward as rows. Left, steering prompts: every prompt re-types all earlier calls, so your rows grow taller; the middle column is a chat per session marked gone; builds 3, 5 and 6 turn red with drift (dates back to MM/DD, swapped to Postgres, lodash is back); your rows cross the dashed attention budget and turn hatched red, ending at 137 percent attention. Right, steering decisions: each call lands once in a shared ctx column as an exec or code ctx entry; you are touched on three rows only, two already approved from chat and one conflict you decide; every build follows ctx; attention ends at 40 percent with zero drift." style="width:100%;height:auto;border-radius:8px;display:block"></picture>
+    <figcaption id="gif-cap">Six builds, one row each, stacking upward. Steering prompts: each prompt re-types every call so far, chat forgets them between sessions, and the agent drifts on whatever you didn't repeat. Steering decisions: each call lands once in the decision store, and every build follows it. The dashed box is your attention budget.</figcaption>
+  </figure>
+
+  <section class="col">
+    <p>Both panels make the same six calls. Steering prompts, each call lives in a prompt, and the prompt dies with its session. So every prompt carries all the old calls again, and any you skip, the build quietly undoes. Steering decisions, each call lands once and every build follows it. You're asked three times, all for calls that are actually yours.</p>
+    <p>Same calls, same agent. The only difference is where a decision lives. So that's the design question: where should it live, what goes there, and how does it steer?</p>
+  </section>
+
+  <section class="col">
+    <h2>Decisions need a home</h2>
+    <p>Today they have none that lasts. Prompts and sessions forget. Specs hold decisions, but frozen on day one, so they're stale by build two. Context files and memory keep everything, kept by hand or by habit, until it's noise. The rest stays in your head as tribal knowledge.</p>
+  </section>
+
+  <figure class="col map" aria-labelledby="map-cap">
+    <div class="svgwrap wide">
+      <svg viewBox="0 0 640 370" role="img" aria-label="Chart. Horizontal axis: how long it keeps steering, from one turn to every build. Vertical axis: what it holds, from procedure at the bottom to decisions with why and not at the top. Prompts and sessions sit bottom left: procedure, short-lived. Specs sit in the middle: some decisions, stale by build two. Memory and prompt logs sit bottom right: kept, but unsorted noise. Signals sits top right: decisions with their why and not, steering every build.">
+        <rect x="80" y="232" width="144" height="66" rx="8" fill="var(--warn-soft)"/>
+        <text x="152" y="260" text-anchor="middle" fill="var(--warn)" class="t" font-size="16">Prompts</text>
+        <text x="152" y="281" text-anchor="middle" fill="var(--muted)" font-size="12">one turn, all how</text>
+        <rect x="234" y="232" width="144" height="66" rx="8" fill="var(--rule)" opacity=".55"/>
+        <text x="306" y="260" text-anchor="middle" fill="var(--fg)" class="t" font-size="16">Sessions</text>
+        <text x="306" y="281" text-anchor="middle" fill="var(--muted)" font-size="12">gone when it ends</text>
+        <rect x="250" y="128" width="168" height="72" rx="8" fill="var(--human-soft)"/>
+        <text x="334" y="156" text-anchor="middle" fill="var(--human)" class="t" font-size="16">Specs</text>
+        <text x="334" y="178" text-anchor="middle" fill="var(--muted)" font-size="12">stale by build two</text>
+        <rect x="442" y="214" width="160" height="84" rx="8" fill="var(--rule)" opacity=".55"/>
+        <text x="522" y="244" text-anchor="middle" fill="var(--fg)" class="t" font-size="16">Memory, logs</text>
+        <text x="522" y="265" text-anchor="middle" fill="var(--muted)" font-size="12">kept, unsorted</text>
+        <text x="522" y="282" text-anchor="middle" fill="var(--muted)" font-size="12">noise grows</text>
+        <rect x="442" y="38" width="160" height="84" rx="8" fill="var(--agent-soft)" stroke="var(--agent)" stroke-width="1.5" stroke-dasharray="6 5"/>
+        <text x="522" y="70" text-anchor="middle" fill="var(--agent)" class="t" font-size="16">Signals</text>
+        <text x="522" y="91" text-anchor="middle" fill="var(--muted)" font-size="12">what · why · not</text>
+        <text x="522" y="108" text-anchor="middle" fill="var(--muted)" font-size="12">every build</text>
+        <path d="M422 150 C 445 150, 440 110, 436 100" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M431 106 L436 98 L442 105" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M522 208 C 522 180, 522 150, 522 130" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M516 137 L522 128 L528 137" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <line x1="70" y1="312" x2="612" y2="312" stroke="var(--fg)" stroke-width="1.5"/>
+        <path d="M604 306 L613 312 L604 318" fill="none" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="70" y1="312" x2="70" y2="26" stroke="var(--fg)" stroke-width="1.5"/>
+        <path d="M64 34 L70 25 L76 34" fill="none" stroke="var(--fg)" stroke-width="1.5"/>
+        <text x="612" y="338" text-anchor="end" fill="var(--muted)" font-size="12">how long it keeps steering →</text>
+        <text x="74" y="338" fill="var(--muted)" font-size="12">one turn</text>
+        <text x="50" y="312" transform="rotate(-90 50 312)" fill="var(--muted)" font-size="12">what it holds: how → why</text>
+      </svg>
+    </div>
+    <div class="svgwrap narrow">
+      <svg viewBox="0 0 340 480" role="img" aria-label="Chart. Horizontal axis: how long it keeps steering. Vertical axis: what it holds, from how to why. Prompts and sessions bottom left, specs in the middle, memory and logs bottom right, Signals top right.">
+        <rect x="44" y="372" width="124" height="58" rx="8" fill="var(--warn-soft)"/>
+        <text x="106" y="396" text-anchor="middle" fill="var(--warn)" class="t" font-size="15">Prompts</text>
+        <text x="106" y="416" text-anchor="middle" fill="var(--muted)" font-size="11">one turn, all how</text>
+        <rect x="178" y="372" width="124" height="58" rx="8" fill="var(--rule)" opacity=".55"/>
+        <text x="240" y="396" text-anchor="middle" fill="var(--fg)" class="t" font-size="15">Sessions</text>
+        <text x="240" y="416" text-anchor="middle" fill="var(--muted)" font-size="11">gone when it ends</text>
+        <rect x="56" y="214" width="140" height="58" rx="8" fill="var(--human-soft)"/>
+        <text x="126" y="238" text-anchor="middle" fill="var(--human)" class="t" font-size="15">Specs</text>
+        <text x="126" y="258" text-anchor="middle" fill="var(--muted)" font-size="11">stale by build two</text>
+        <rect x="190" y="290" width="134" height="66" rx="8" fill="var(--rule)" opacity=".55"/>
+        <text x="257" y="314" text-anchor="middle" fill="var(--fg)" class="t" font-size="15">Memory, logs</text>
+        <text x="257" y="333" text-anchor="middle" fill="var(--muted)" font-size="11">kept, unsorted</text>
+        <text x="257" y="348" text-anchor="middle" fill="var(--muted)" font-size="11">noise grows</text>
+        <rect x="190" y="34" width="134" height="80" rx="8" fill="var(--agent-soft)" stroke="var(--agent)" stroke-width="1.5" stroke-dasharray="6 5"/>
+        <text x="257" y="64" text-anchor="middle" fill="var(--agent)" class="t" font-size="15">Signals</text>
+        <text x="257" y="84" text-anchor="middle" fill="var(--muted)" font-size="11">what · why · not</text>
+        <text x="257" y="100" text-anchor="middle" fill="var(--muted)" font-size="11">every build</text>
+        <path d="M126 210 C 126 160, 150 92, 180 82" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M172 77 L182 81 L175 89" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M257 286 C 257 220, 257 160, 257 122" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <path d="M251 129 L257 120 L263 129" fill="none" stroke="var(--agent)" stroke-width="1.8"/>
+        <line x1="34" y1="444" x2="330" y2="444" stroke="var(--fg)" stroke-width="1.5"/>
+        <path d="M322 438 L331 444 L322 450" fill="none" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="34" y1="444" x2="34" y2="20" stroke="var(--fg)" stroke-width="1.5"/>
+        <path d="M28 28 L34 19 L40 28" fill="none" stroke="var(--fg)" stroke-width="1.5"/>
+        <text x="330" y="468" text-anchor="end" fill="var(--muted)" font-size="11">how long it keeps steering →</text>
+        <text x="20" y="444" transform="rotate(-90 20 444)" fill="var(--muted)" font-size="11">what it holds: how → why</text>
+      </svg>
+    </div>
+    <figcaption id="map-cap">What it holds, and how long it keeps steering. Each tool gets one of the two. A home for decisions needs both.</figcaption>
+  </figure>
+
+  <section class="col">
+    <h2>What a decision holds</h2>
+    <p>A prompt says what to do now. A decision says what's true, why, and what was ruled out.</p>
+  </section>
+
+  <div class="col versus">
+    <div class="card prompt">
+      <div class="eyebrow">A prompt, build six</div>
+      <pre>use sqlite. dates in ISO.
+don't add lodash again.
+and no, still not postgres.</pre>
+    </div>
+    <div class="card decision">
+      <div class="eyebrow">A decision, once</div>
+      <pre><span class="k">arch/data#sqlite</span>
+<span class="k">what:</span>    SQLite for storage
+<span class="k">why:</span>     single user, zero ops
+<span class="k">why not:</span> Postgres
+<span class="k">revisit:</span> a second user exists</pre>
+    </div>
+  </div>
+
+  <section class="col">
+    <p>The <code>why not</code> is what stops the agent re-arguing Postgres on every build, and <code>revisit</code> says when it's fair to. Written this way, a decision keeps steering long after the task that made it. That's why it should be the source of truth, with context, docs and code derived from it.</p>
+    <p class="pull">Code shouldn't be a derivative of specs.<br>It's a derivative of <span class="h">decisions</span>.</p>
+    <p>But write down every decision and you've rebuilt the noise. So the next question is which ones.</p>
+  </section>
+
+  <section class="col">
+    <h2>One test, one owner</h2>
+    <p>Signals keeps decisions in <code>.decisions/</code> and asks one question of each candidate, no matter who made it: <strong>would rebuilding from the store alone get this wrong, or would changing it later need an executive to decide again?</strong> If yes, it goes to the role that owns it:</p>
+    <ul class="rules">
+      <li><span class="who h">CEO</span><span><strong>Why and for whom.</strong> Audience, non-goals, budget, big bets.</span></li>
+      <li><span class="who h">PM</span><span><strong>What is built.</strong> Feature scope, user-facing rules and behaviour.</span></li>
+      <li><span class="who a">Architect</span><span><strong>How it is built.</strong> Stack, data, boundaries, security posture.</span></li>
+      <li><span class="who">Detail</span><span><strong>Everything else.</strong> A library inside the agreed stack, naming, file layout. Never stored; the agent just proceeds.</span></li>
+    </ul>
+    <p>Most decisions are details. That's what keeps the store small enough to read, for you and for the agent. The rest land in the smallest partition that covers them, like <code>pm/onboarding</code> or <code>arch/auth</code>, so a task loads only what it touches. And the store never holds a conflict: a new decision either fits, or comes to you.</p>
+  </section>
+
+  <section class="col">
+    <h2>You're the board</h2>
+    <p>That leaves you the board's job. Boards don't read every pull request, and engineers don't re-argue strategy before each commit, because both work from the same calls. The store is that shared page. The agent asks it before choosing, and proposes a decision when it's about to make a call an executive would own. You approve every executive decision and settle every conflict. Plans are reviewed in one batch with <code>/signals update</code>; a call made mid-build waits for your answer before the agent builds on it. You never get asked about variable names.</p>
+    <p>Put together: decisions get a home, a test keeps the home small, each one has an owner, builds obey them, and your attention goes only where a call is yours to make.</p>
+    <p class="pull">Decide <span class="h">once</span>.<br>Every <span class="a">build</span> follows.</p>
+    <hr>
+    <p class="aside">Signals is a skill for any coding agent: <a href="./">smarchone.github.io/signals</a>. The earlier post on vibes vs micromanagement: <a href="https://smarchone.substack.com/p/vibes-and-micromanagement">Vibes and micromanagement</a>.</p>
+  </section>
+</main>
+</html>
