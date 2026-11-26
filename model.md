@@ -96,7 +96,7 @@ Concurrent users > 50k, or a mobile app enters scope.
 
 **Response format**
 - Answers → **per role**, only roles that own the topic speak.
-- Reviews → **per decision**, grouped by partition, conflicts first.
+- Reviews → `needs you` (numbered, conflicts first, quoted) then `already approved`; content, not identifiers.
 - Non-executive update → one line: "not stored, continue".
 
 **Executive test:** would rebuilding from the decisions get this wrong without it, or would a role need to re-decide it? If no → detail, left to the agent, never stored.
@@ -139,11 +139,15 @@ CEO:  ceo#infra-budget caps infra at $200/mo; Auth0 ≈ $240/mo. Raise budget or
 dev:  self-host
 
 dev: /signals update
-signals: Plan review (2)
-  pm/onboarding · NEW #google-signup           serves ceo#audience-smb
-  arch/auth     · NEW #oauth-no-token-storage  serves arch/auth#server-sessions
-  approve all / pick / edit
-dev: all
+signals: Review · 2 decisions
+  needs you:
+  1. **No OAuth token storage** · Architect · agent
+     keeps server sessions the only credential; nothing to leak
+     → approve · drop · or say your version
+
+  already approved:
+  - **Google signup alongside email** · PM · you, chat
+dev: approve
 ```
 
 **Build (interactive)**
@@ -152,17 +156,22 @@ agent: /signals how long do sessions last?
 signals: Arch: Undecided. Nearest: arch/auth#server-sessions (no expiry).
 
 agent: /signals update "sessions expire after 30 days"
-signals: 🔒 arch/auth · NEW #session-expiry-30d · serves ceo#audience-smb · no conflicts
-       approve / edit / reject
+signals: 🔒 needs you:
+       **30-day idle sessions** · Architect · agent
+       SMB users hate re-login; 7 days adds friction
+       → approve · drop · or say your version
 dev:   approve
 
 agent: /signals update "use passport.js for OAuth"
 signals: Not executive (library choice). Not stored, continue.
 
 agent: /signals update "store Google refresh token"
-signals: 🔒 ⚠ Conflicts with arch/auth#oauth-no-token-storage
-       a) keep decision, agent changes approach   b) amend decision
-dev:   a
+signals: 🔒 needs you:
+       ⚠ **Keep Google refresh token** · Architect · agent · conflicts with 1
+       new, Architect: "Store the Google refresh token to call Google APIs later."
+       a. Architect:   "Never keep OAuth tokens; store the provider user id only."
+       → replace a · drop the new one · or say your version
+dev:   drop it
 ```
 
 **Steer (interactive)**
@@ -170,10 +179,14 @@ dev:   a
 dev: if a Google email matches an existing account, link them
 
 agent: /signals update "link accounts by verified email"
-signals: 🔒 pm/onboarding · NEW #link-accounts-by-email · serves #google-signup
-          PM ↔ Arch: needs arch/auth#user-key-verified-email (linked pair)
-       approve both / edit / reject
-dev:   approve both
+signals: 🔒 needs you:
+       **Users keyed by verified email** · Architect · agent
+       linking needs one user per verified email (pairs with yours below)
+       → approve · drop · or say your version
+
+       already approved:
+       - **Link accounts by verified email** · PM · you, chat
+dev:   approve
 ```
 
 **End**
@@ -190,12 +203,21 @@ PM:   #signup-2-screens no longer matters — admins invite users. Keep #google-
 Arch: Self-hosted SAML is heavy; ceo#infra-budget blocks hosted vendors (~$400/mo).
 
 dev: /signals update
-signals: Override review — all or nothing
-  1. ceo#audience-midmarket                 accept / edit / cancel all
-  2. ceo#infra-budget → $500/mo             a) raise  b) keep, self-host SAML
-  3. pm/onboarding#signup-2-screens         a) retire  b) keep
-  4. pm/onboarding#google-signup            a) keep  b) retire
-dev: accept · 2a · 3a · 4a
+signals: Review · override, all or nothing
+  needs you:
+  1. ⚠ **Target mid-size companies, SSO** · CEO · you, chat · conflicts with 2
+     new, CEO:   "Target mid-size companies; SSO required."
+     a. CEO:     "First users are SMBs on Google Workspace."
+     b. CEO:     "Infra capped at $200/mo." (SAML vendors ~$400/mo)
+     2 more decisions rest on a–b (items 2, 3)
+     → replace a–b (budget to $500/mo) · replace a, keep b (self-host SAML) · drop · or say your version
+  2. **Retire 2-screen signup** · PM · agent
+     admins invite users at mid-market; self-serve screens unused
+     → approve · drop · or say your version
+  3. **Keep Google signup** · PM · agent
+     small orgs still sign up themselves
+     → approve · drop · or say your version
+dev: replace both, approve 2 and 3
 signals: Committed 4 edits as one change.
 ```
 

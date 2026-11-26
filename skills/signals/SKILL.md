@@ -112,7 +112,7 @@ Output exactly this, as markdown (not a code block), then stop and wait for the 
 
 **Architect:** <mechanism, number or hard limit, 2–4 lines; optional diagram>
 
-**Your move:** <2–3 concrete directions> · 📝 <n> drafts (`partition#slug`, …)
+**Your move:** <2–3 concrete directions> · 📝 <n> drafts (**handle**, …)
 
 No headings, numbering, or other speaker names. The panel ends when the user runs `/signals update`, says the discussion is done, or moves on to building. Only then run the batch update once: write all drafts to `session/` and show one review.
 
@@ -146,7 +146,7 @@ Before proposing any decision, check it against:
 - every decision it `serves` and every decision above it (CEO always),
 - peer decisions it touches (PM ↔ Architect).
 
-A conflict is a forced choice for the human: `a) keep existing, change approach` / `b) replace existing`. Never resolve a conflict yourself. Never let the higher role win automatically. Show conflicts first in any review.
+A conflict is a forced choice for the human: replace the stored decision(s), drop the new one, replace some and narrow the new one, or their own version. Never resolve a conflict yourself. Never let the higher role win automatically. Show conflicts first in any review.
 
 ### Overrides
 When a decision would override or invalidate decisions below it (any change to a CEO decision, or a decision others `Serve`):
@@ -157,24 +157,41 @@ When a decision would override or invalidate decisions below it (any change to a
 
 ## Review format
 
-Per decision, grouped by partition, conflicts first.
+Two groups, empty groups omitted. Show content, not identifiers: no slugs, file paths or full records. The human asks for those, or for what rests on a decision, when they want them.
+
+- **needs you:** numbered, conflicts first. Every conflict, and every decision you proposed (`by: agent`). Nothing here lands unanswered.
+- **already approved:** decisions the human stated or agreed to in chat. Their words are the approval; the line catches a misread. Silence = stands.
+
 ```
-Plan review (3) · 1 conflict
+Review · 3 decisions · 1 conflict
 
-⚠ arch/auth#oauth-no-token-storage — conflict
-   Plan stores a refresh token. Decision says no tokens kept.
-   a) keep decision, change approach   b) replace decision
+needs you:
+1. ⚠ **Keep Google tokens** · PM · conflicts with 3
+   new, PM:       "Sync Google contacts; keep a refresh token to do it."
+   a. Architect:  "Never keep OAuth tokens; store the provider user id only."
+   b. Architect:  "No third-party data at rest beyond profile basics."
+   c. CEO:        "No data a breach would make us disclose."
+   4 more decisions rest on a–c
+   → replace a–c · drop the new one · replace a, b but keep c · or say your version
 
-pm/onboarding · NEW #google-signup
-   Google signup alongside email. serves ceo/business#audience-smb
-   why: SMB users live in Google Workspace · why-not: Microsoft (low demand)
+2. **30-day idle sessions** · Architect · agent
+   SMB users hate re-login; 7 days adds friction
+   → approve · drop · or say your version
 
-arch/auth · NEW #session-expiry-30d
-   Sessions expire after 30 days idle. serves ceo/business#audience-smb
-   why: SMB users hate re-login · why-not: 7d (friction)
+already approved:
+- **Google signup alongside email** · PM · you, chat
 
-answer: approve all / pick / edit <slug> / reject <slug> · conflicts need a choice
+reply in your own words, e.g. "replace all for 1, approve 2"
 ```
+
+- **Handle:** bold, ≤6 words, names the decision for a human. The slug is chosen at commit.
+- **Role** beside the handle, never a file path. Held items end with `agent` or `you, chat`.
+- **Conflict:** one entry per new decision, every stored decision it contradicts quoted under it as `a.`, `b.`, … with its role. Conflicts can cross any roles. Quote at most 3; say `+ <n> more` for the rest.
+- **Knock-on:** decisions that `serve` a replaced one are counted (`4 more decisions rest on a–c`), not quoted. On replace, recheck them; any that no longer fit come back as their own items before anything commits (see **Overrides**).
+- **Choices** sit on each held item after `→`, phrased as outcomes. A partial choice (`replace a, b but keep c`) narrows the new decision until nothing contradicts; show the narrowed wording for approval.
+- **Reply** is plain language. Map it to items; if a reply is unclear, ask about that item only. One held item needs no number.
+- A why line (≤12 words) for agent decisions only.
+
 Review shows a summary. The committed record uses the template below.
 
 ## Decision record
@@ -254,6 +271,6 @@ Partitions have no brief: `# <Role> · <area>`, a `> <what it owns>` line, then 
 ## Response rules
 - Answers: per role, only owning roles, 1–2 lines. **Bold role name**, empty line between roles.
 - Panel: all three roles, CEO → PM → Architect, 2–4 lines each, then **Your move:**. No store writes until the panel ends.
-- Reviews: per decision, grouped by partition, conflicts first.
+- Reviews: `needs you` (numbered, conflicts first) then `already approved`; content, not identifiers.
 - Non-executive update: one line, then continue.
 - Never write to partition files without explicit approval in this conversation.
