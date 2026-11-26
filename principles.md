@@ -1,6 +1,6 @@
-# Org — design principles
+# signals — design principles
 
-The ideas the Org model is built on, and why each one is there.
+The ideas the signals model is built on, and why each one is there.
 The mechanics are in `model.md`.
 
 ---
@@ -76,17 +76,17 @@ A high-level decision that overrides downstream ones (a pivot, a cost-driven db 
 
 ## 10. One interface: the panel
 
-- `/org` is the single entry point to ask, propose, surface conflicts, and update.
+- `/signals` is the single entry point to ask, propose, surface conflicts, and update.
 - Ask anything. Only the roles that own the topic answer, 1–2 lines each.
 - A meeting is just the panel with more voices.
 - The same process runs for planning, after the build, for steering, and for drift. Only the opener differs.
 
 ## 11. Batch for plans, interactive for build and steer
 
-- Planning decisions wait for one batch review (`/org update`).
-- During build and steer, an executive decision **blocks** until reviewed (`/org update <x>`). The agent should not build on an unapproved decision.
+- Planning decisions wait for one batch review (`/signals update`).
+- During build and steer, an executive decision **blocks** until reviewed (`/signals update <x>`). The agent should not build on an unapproved decision.
 - Non-executive decisions are **left alone**: not stored, the agent continues.
-- The coding agent invokes `org` on its own during build and steer. A closing `/org update` scan is the backstop.
+- The coding agent invokes `signals` on its own during build and steer. A closing `/signals update` scan is the backstop.
 
 ## 12. Executive bar
 
@@ -119,7 +119,7 @@ Decisions drive later decisions and the project's evolution, so each field must 
 
 ## 16. Drift is a fallback, run through the same loop
 
-- `/org drift` checks decisions against the code.
+- `/signals drift` checks decisions against the code.
 - Each mismatch is a choice: fix the code (build → steer) or amend the decision (review).
 
 ## 17. Steer with decisions, not prompts

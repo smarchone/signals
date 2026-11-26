@@ -1,13 +1,13 @@
 ---
-name: org
-description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .decisions/. Use when the user runs /org (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /org update before relying on a new executive decision.
+name: signals
+description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .decisions/. Use when the user runs /signals (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /signals update before relying on a new executive decision.
 ---
 
-# org
+# signals
 
 The project is run like a small org. Three executives own decisions: **CEO, PM, Architect**. The human is the **board** and finalizes every executive decision and every conflict. You (the agent) never write an executive decision to the store without the human's explicit approval in this conversation.
 
-Principles and the full model with a worked session live in the org repo (`principles.md`, `model.md`); they are not needed at runtime.
+Principles and the full model with a worked session live in the signals repo (`principles.md`, `model.md`); they are not needed at runtime.
 
 ## Store
 
@@ -55,20 +55,20 @@ Put a decision in the **lowest partition that covers everything it touches**.
 
 ## Commands
 
-### `/org ctx <task>`
+### `/signals ctx <task>`
 1. Read `map.md`, pick the partitions the task touches.
 2. Load `ceo.md` + those partitions + partitions they `Serve`.
 3. List any files in `session/` with unreviewed drafts.
 4. Output:
 ```
-org: Partitions: pm/onboarding, arch/auth · loaded 6 decisions
+signals: Partitions: pm/onboarding, arch/auth · loaded 6 decisions
      ceo#audience-smb · ceo#infra-budget · pm/onboarding#email-signup-v1 · …
      ⚠ task touches pm/onboarding#email-signup-v1  (one line per decision the task may change)
      📝 3 unreviewed drafts from "google login" (2026-11-26) — review now?
 ```
 Then treat loaded decisions as binding constraints for planning and building.
 
-### `/org <question>`
+### `/signals <question>`
 Answer as a panel. Only roles that own the topic speak, 1–2 lines each, with citations or **Undecided**.
 Format as markdown (not a code block): role name in bold, followed by a colon, and one empty line between roles.
 
@@ -79,7 +79,7 @@ Example output:
 **Architect:** `arch/auth#server-sessions` holds — store provider id only.
 If the question reveals a conflict, say so in the relevant role's line and offer the choice. Use the panel freely during planning; during build, ask it **before** making any executive choice.
 
-### `/org panel <topic>` — discussion
+### `/signals panel <topic>` — discussion
 A rapid-fire discussion between all three roles, grounded in the store. Use it to explore an open question, a trade-off, or an override before deciding.
 
 Each turn, all three speak, in this order:
@@ -105,9 +105,9 @@ Output exactly this, as markdown (not a code block), then stop and wait for the 
 
 **Your move:** <2–3 concrete directions> · 📝 <n> drafts (`partition#slug`, …)
 
-No headings, numbering, or other speaker names. The panel ends when the user runs `/org update` (batch review of the drafts) or moves on; drafts are written to `session/` so they are not lost.
+No headings, numbering, or other speaker names. The panel ends when the user runs `/signals update` (batch review of the drafts) or moves on; drafts are written to `session/` so they are not lost.
 
-### `/org update` (no argument) — batch
+### `/signals update` (no argument) — batch
 1. Scan the conversation since the last update for executive decisions: agreed in discussion, implied by the plan, given as steers, or made by you.
 2. Skip anything already committed or rejected this session. Drop details.
 3. Write the drafts to `session/<date>-<task>.md`.
@@ -116,7 +116,7 @@ No headings, numbering, or other speaker names. The panel ends when the user run
 
 Use this after planning, and once at the end of build/steer as a backstop.
 
-### `/org update <decision>` — interactive
+### `/signals update <decision>` — interactive
 1. Run the executive test. If it is a detail, reply exactly: `Not executive (<reason>). Not stored, continue.` and continue working.
 2. Ask the store first: is it already decided? If yes, cite it and stop.
 3. Route it, check conflicts (below), draft the full record.
@@ -125,10 +125,10 @@ Use this after planning, and once at the end of build/steer as a backstop.
 
 You call this on your own during build and steering. A user steer that sets or changes an executive choice → call it right away, before acting on the steer.
 
-### `/org drift [partition]`
+### `/signals drift [partition]`
 1. For each decision in scope (all partitions if none given), check the code under its `Scope` against its **What**.
 2. Report ✓ / ✗ per decision, with `file:line` evidence for ✗.
-3. For each ✗ offer: `a) fix code` (becomes a build task; continue with build/steer) or `b) amend decision` (goes through `/org update <decision>`).
+3. For each ✗ offer: `a) fix code` (becomes a build task; continue with build/steer) or `b) amend decision` (goes through `/signals update <decision>`).
 
 ## Conflicts
 
@@ -142,7 +142,7 @@ A conflict is a forced choice for the human: `a) keep existing, change approach`
 ### Overrides
 When a decision would override or invalidate decisions below it (any change to a CEO decision, or a decision others `Serve`):
 1. Find every decision whose `Serves` points at it, transitively.
-2. Run a `/org panel` turn on the override: each role states what changes for its affected decisions.
+2. Run a `/signals panel` turn on the override: each role states what changes for its affected decisions.
 3. Show one review listing the override and every affected decision with options.
 4. **All or nothing:** commit the override and all downstream edits together, or none. If the human cancels, nothing changes.
 

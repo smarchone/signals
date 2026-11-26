@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>org · steer decisions, not prompts</title>
+  <title>signals · steer decisions, not prompts</title>
   <meta name="description" content="Steer decisions, not prompts. A skill that keeps your project's executive decisions in markdown, owned by a CEO, PM and Architect. Your agent asks before choosing; you approve every call." />
   <!-- Google Analytics (same property as smarchone.github.io/skills) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-ZZCV0RCPVZ"></script>
@@ -116,13 +116,13 @@
 </head>
 <body>
 <main>
-  <h1><a href="https://github.com/smarchone/org">~/ <span>smarchone/org</span></a></h1>
+  <h1><a href="https://github.com/smarchone/signals">~/ <span>smarchone/signals</span></a></h1>
 
   <div class="top">
     <p class="hero">Steer decisions,<br class="m"> not prompts.<span class="sub">An executive decision layer <br class="m"><em>for your coding agent.</em></span></p>
-    <a class="repo" href="https://github.com/smarchone/org" aria-label="org on GitHub" title="org on GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+    <a class="repo" href="https://github.com/smarchone/signals" aria-label="signals on GitHub" title="signals on GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
-  <p class="tldr"><span>tl;dr</span>Don't micromanage your agent, and don't let it run wild.<br class="d"> Steer the big calls: <code>/org ctx</code> loads them, and nothing new lands without your OK.</p>
+  <p class="tldr"><span>tl;dr</span>Don't micromanage your agent, and don't let it run wild.<br class="d"> Steer the big calls: <code>/signals ctx</code> loads them, and nothing new lands without your OK.</p>
 
   <div class="problem">
     <span class="lbl">The problem</span>
@@ -140,19 +140,19 @@
   </section>
 
   <div class="flow">
-    <span>plan</span><i>→</i><span>/org ctx</span><i>→</i><span>build</span><i>→</i><span>steer</span><i>→</i><span class="gold">/org update</span><i>→</i><span class="end">.decisions/</span>
+    <span>plan</span><i>→</i><span>/signals ctx</span><i>→</i><span>build</span><i>→</i><span>steer</span><i>→</i><span class="gold">/signals update</span><i>→</i><span class="end">.decisions/</span>
   </div>
 
   <p class="eyebrow">Get started <span class="time">· <b>~1 min</b></span> <span class="req">· needs a coding agent with skills</span><button id="copy">copy</button></p>
   <div class="win">
-<pre class="screen" id="steps"><span class="p">$ </span>npx skills add smarchone/org -g   <span class="c"># for all your projects</span>
+<pre class="screen" id="steps"><span class="p">$ </span>npx skills add smarchone/signals -g   <span class="c"># for all your projects</span>
 
-<span class="a">› </span>/org ctx "add password reset"     <span class="c"># load the decisions it touches</span>
-<span class="a">› </span>/org update                       <span class="c"># review what the session settled</span></pre>
+<span class="a">› </span>/signals ctx "add password reset"     <span class="c"># load the decisions it touches</span>
+<span class="a">› </span>/signals update                       <span class="c"># review what the session settled</span></pre>
   </div>
 
 
-  <p class="hint">made with <span class="heart" aria-label="love">♥</span> · <a class="gh" href="https://github.com/smarchone/org"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>@smarchone/org</a></p>
+  <p class="hint">made with <span class="heart" aria-label="love">♥</span> · <a class="gh" href="https://github.com/smarchone/signals"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>@smarchone/signals</a></p>
 </main>
 <script>
   const btn = document.getElementById('copy');

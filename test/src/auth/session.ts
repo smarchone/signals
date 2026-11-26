@@ -1,4 +1,4 @@
-// Test fixture for /org drift. Contains one planted violation of arch/auth#server-sessions.
+// Test fixture for /signals drift. Contains one planted violation of arch/auth#server-sessions.
 import type { Request, Response } from "express";
 import { db } from "../db";
 

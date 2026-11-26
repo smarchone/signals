@@ -1,4 +1,4 @@
-# org
+# signals
 
 An agent skill that keeps the **executive decisions** of a project (CEO, PM, Architect) in markdown files, so they survive across sessions and drive planning, building and steering.
 
@@ -13,31 +13,31 @@ An agent skill that keeps the **executive decisions** of a project (CEO, PM, Arc
 Say you're adding password reset. Before you start, get the decisions it touches:
 
 ```
-/org ctx "add password reset"
+/signals ctx "add password reset"
 ```
 
 Midway, you wonder why login works the way it does:
 
 ```
-/org why server sessions and not JWT?
+/signals why server sessions and not JWT?
 ```
 
 While building, you decide something the store should keep:
 
 ```
-/org update "sessions expire after 30 days idle"
+/signals update "sessions expire after 30 days idle"
 ```
 
 When the plan or session is done, review everything it settled in one batch:
 
 ```
-/org update
+/signals update
 ```
 
 ## Install
 
 ```sh
-npx skills add smarchone/org -g
+npx skills add smarchone/signals -g
 ```
 
 ## Try it here

@@ -1,10 +1,10 @@
-org
+signals
 Copyright 2026 Saikumar Chintada
 
 This product includes software developed by Saikumar Chintada
-(https://github.com/smarchone/org).
+(https://github.com/smarchone/signals).
 
-org: an executive decision store for coding agents. Decisions are owned
+signals: an executive decision store for coding agents. Decisions are owned
 by a CEO, PM and Architect, kept in .decisions/, and approved by a human
 before they drive planning, building and steering.
 

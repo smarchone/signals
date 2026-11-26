@@ -1,6 +1,6 @@
-# Testing the org skill
+# Testing the signals skill
 
-Start your agent inside `test/`. `test/.claude/skills/org` (Claude Code) and `test/.agents/skills/org` (other agents) are symlinks to `../skills/org`, so edits to the skill are picked up directly. Run the steps in order.
+Start your agent inside `test/`. `test/.claude/skills/signals` (Claude Code) and `test/.agents/skills/signals` (other agents) are symlinks to `../skills/signals`, so edits to the skill are picked up directly. Run the steps in order.
 
 ## Seed state
 
@@ -13,18 +13,18 @@ Start your agent inside `test/`. `test/.claude/skills/org` (Claude Code) and `te
 
 | # | Type | Expect |
 |---|---|---|
-| 1 | `/org ctx "add Google login"` | loads ceo + pm/onboarding + arch/auth (+ arch/data); flags `email-signup-v1` |
-| 2 | `/org can we add Google login?` | PM says **Undecided** citing `email-signup-v1`; Arch cites `server-sessions`. No CEO line unless budget comes up |
-| 3 | `/org why not Auth0?` | CEO or Arch cites `ceo#infra-budget`; offers raise budget vs self-host |
-| 4 | say "self-host", then `/org update` | batch review: `pm/onboarding#google-signup`, an arch/auth OAuth decision; full records written after approval |
-| 5 | "build it" (or pretend), agent decides session expiry | agent calls `/org update` on its own; 🔒 one-item review; work waits |
-| 6 | `/org update "use passport.js for OAuth"` | `Not executive (...). Not stored, continue.` |
-| 7 | `/org update "cache sessions in Redis"` | ⚠ conflict with `arch/data#single-datastore` (and `ceo#infra-budget`); forced a/b choice |
-| 8 | steer: "if a Google email matches an existing account, link them" | agent calls `/org update` before acting; PM decision + linked arch/auth decision |
-| 9 | `/org update` | nothing missed, or only items not yet reviewed |
-| 10 | `/org go upmarket: target mid-size companies with SSO` | override panel: lists decisions that serve `ceo#audience-smb`; one all-or-nothing review |
+| 1 | `/signals ctx "add Google login"` | loads ceo + pm/onboarding + arch/auth (+ arch/data); flags `email-signup-v1` |
+| 2 | `/signals can we add Google login?` | PM says **Undecided** citing `email-signup-v1`; Arch cites `server-sessions`. No CEO line unless budget comes up |
+| 3 | `/signals why not Auth0?` | CEO or Arch cites `ceo#infra-budget`; offers raise budget vs self-host |
+| 4 | say "self-host", then `/signals update` | batch review: `pm/onboarding#google-signup`, an arch/auth OAuth decision; full records written after approval |
+| 5 | "build it" (or pretend), agent decides session expiry | agent calls `/signals update` on its own; 🔒 one-item review; work waits |
+| 6 | `/signals update "use passport.js for OAuth"` | `Not executive (...). Not stored, continue.` |
+| 7 | `/signals update "cache sessions in Redis"` | ⚠ conflict with `arch/data#single-datastore` (and `ceo#infra-budget`); forced a/b choice |
+| 8 | steer: "if a Google email matches an existing account, link them" | agent calls `/signals update` before acting; PM decision + linked arch/auth decision |
+| 9 | `/signals update` | nothing missed, or only items not yet reviewed |
+| 10 | `/signals go upmarket: target mid-size companies with SSO` | override panel: lists decisions that serve `ceo#audience-smb`; one all-or-nothing review |
 | 11 | cancel the override | no file changes |
-| 12 | `/org drift arch/auth` | ✗ `server-sessions` with `src/auth/session.ts:10`; offers fix code / amend |
+| 12 | `/signals drift arch/auth` | ✗ `server-sessions` with `src/auth/session.ts:10`; offers fix code / amend |
 
 ## Pass criteria
 

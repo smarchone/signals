@@ -1,7 +1,7 @@
-# Org — decisions owned by a 3-executive org
+# signals — decisions owned by a 3-executive org
 
 > The project is run like a small org with three executives — **CEO, PM, Architect** — each owning a partitioned slice of the decisions.
-> `/org` is the one interface: dev and coding agent ask, propose, and resolve through it; the human approves everything executive.
+> `/signals` is the one interface: dev and coding agent ask, propose, and resolve through it; the human approves everything executive.
 
 **Bar:** the decision store alone should be enough to rebuild ~90% of the codebase.
 
@@ -79,20 +79,20 @@ Concurrent users > 50k, or a mobile app enters scope.
 - Roles are **lenses** over their partitions, not agents.
 - A role answers **only from stored decisions, with citations**, or says **undecided**. Never improvises.
 
-## 4. Interface — the `org` skill
+## 4. Interface — the `signals` skill
 
 | Command | Does | Review |
 |---|---|---|
-| `/org ctx <task>` | loads relevant decisions along the partition path; surfaces unreviewed drafts | — |
-| `/org <question>` | relevant roles answer, per role, 1–2 lines each | — |
-| `/org panel <topic>` | all three roles discuss (CEO → PM → Architect, 2–4 lines each), grounded in the store; agreed points become drafts | via `/org update` |
-| `/org update` | scans the conversation so far for executive decisions not yet recorded | batch |
-| `/org update <decision>` | proposes one decision | interactive, immediate |
-| `/org drift [partition]` | checks decisions against the code | each mismatch → `/org update` |
+| `/signals ctx <task>` | loads relevant decisions along the partition path; surfaces unreviewed drafts | — |
+| `/signals <question>` | relevant roles answer, per role, 1–2 lines each | — |
+| `/signals panel <topic>` | all three roles discuss (CEO → PM → Architect, 2–4 lines each), grounded in the store; agreed points become drafts | via `/signals update` |
+| `/signals update` | scans the conversation so far for executive decisions not yet recorded | batch |
+| `/signals update <decision>` | proposes one decision | interactive, immediate |
+| `/signals drift [partition]` | checks decisions against the code | each mismatch → `/signals update` |
 
-- **Dev invokes** for planning, questions, panels, drift. Use intuition-panel for raw ideas before a store exists; `/org panel` once it does.
-- **Agent invokes on its own** during build and steer, triggered by the skill description. The closing `/org update` scan is the backstop for misses.
-- The agent must `/org <question>` before `/org update <x>`, so it doesn't propose what's already decided.
+- **Dev invokes** for planning, questions, panels, drift. Use intuition-panel for raw ideas before a store exists; `/signals panel` once it does.
+- **Agent invokes on its own** during build and steer, triggered by the skill description. The closing `/signals update` scan is the backstop for misses.
+- The agent must `/signals <question>` before `/signals update <x>`, so it doesn't propose what's already decided.
 
 **Response format**
 - Answers → **per role**, only roles that own the topic speak.
@@ -104,15 +104,15 @@ Concurrent users > 50k, or a mobile app enters scope.
 ## 5. Flow
 
 ```
-plan   → /org ctx · discuss with /org <q> · /org update        → batch review
-build  → agent: /org <q> before choosing · /org update <x>     → blocks, dev answers
-steer  → dev steer is executive → /org update <x>              → interactive
-end    → /org update                                           → catches misses
-drift  → /org drift → fix code (build/steer) or amend decision (review)
+plan   → /signals ctx · discuss with /signals <q> · /signals update        → batch review
+build  → agent: /signals <q> before choosing · /signals update <x>     → blocks, dev answers
+steer  → dev steer is executive → /signals update <x>              → interactive
+end    → /signals update                                           → catches misses
+drift  → /signals drift → fix code (build/steer) or amend decision (review)
 ```
 
 - Planning is **batch**. Build and steer are **interactive**.
-- Unreviewed drafts persist in `session/` and resurface at the next `/org ctx`. They never expire quietly.
+- Unreviewed drafts persist in `session/` and resurface at the next `/signals ctx`. They never expire quietly.
 
 ## 6. Conflicts and overrides
 
@@ -126,20 +126,20 @@ drift  → /org drift → fix code (build/steer) or amend decision (review)
 
 **Plan (batch)**
 ```
-dev: /org ctx "add Google login"
-org: Partitions: pm/onboarding, arch/auth · loaded 6 decisions
+dev: /signals ctx "add Google login"
+signals: Partitions: pm/onboarding, arch/auth · loaded 6 decisions
      ⚠ task touches pm/onboarding#email-signup-v1
 
-dev: /org can we add Google login?
+dev: /signals can we add Google login?
 PM:   Undecided. pm/onboarding#email-signup-v1 covered v1 only. Fits ceo#audience-smb.
 Arch: arch/auth#server-sessions holds — store provider id only. Auth0 breaks ceo#infra-budget.
 
-dev: /org why not Auth0? it's faster
+dev: /signals why not Auth0? it's faster
 CEO:  ceo#infra-budget caps infra at $200/mo; Auth0 ≈ $240/mo. Raise budget or self-host?
 dev:  self-host
 
-dev: /org update
-org: Plan review (2)
+dev: /signals update
+signals: Plan review (2)
   pm/onboarding · NEW #google-signup           serves ceo#audience-smb
   arch/auth     · NEW #oauth-no-token-storage  serves arch/auth#server-sessions
   approve all / pick / edit
@@ -148,19 +148,19 @@ dev: all
 
 **Build (interactive)**
 ```
-agent: /org how long do sessions last?
-org:   Arch: Undecided. Nearest: arch/auth#server-sessions (no expiry).
+agent: /signals how long do sessions last?
+signals: Arch: Undecided. Nearest: arch/auth#server-sessions (no expiry).
 
-agent: /org update "sessions expire after 30 days"
-org:   🔒 arch/auth · NEW #session-expiry-30d · serves ceo#audience-smb · no conflicts
+agent: /signals update "sessions expire after 30 days"
+signals: 🔒 arch/auth · NEW #session-expiry-30d · serves ceo#audience-smb · no conflicts
        approve / edit / reject
 dev:   approve
 
-agent: /org update "use passport.js for OAuth"
-org:   Not executive (library choice). Not stored, continue.
+agent: /signals update "use passport.js for OAuth"
+signals: Not executive (library choice). Not stored, continue.
 
-agent: /org update "store Google refresh token"
-org:   🔒 ⚠ Conflicts with arch/auth#oauth-no-token-storage
+agent: /signals update "store Google refresh token"
+signals: 🔒 ⚠ Conflicts with arch/auth#oauth-no-token-storage
        a) keep decision, agent changes approach   b) amend decision
 dev:   a
 ```
@@ -169,8 +169,8 @@ dev:   a
 ```
 dev: if a Google email matches an existing account, link them
 
-agent: /org update "link accounts by verified email"
-org:   🔒 pm/onboarding · NEW #link-accounts-by-email · serves #google-signup
+agent: /signals update "link accounts by verified email"
+signals: 🔒 pm/onboarding · NEW #link-accounts-by-email · serves #google-signup
           PM ↔ Arch: needs arch/auth#user-key-verified-email (linked pair)
        approve both / edit / reject
 dev:   approve both
@@ -178,31 +178,31 @@ dev:   approve both
 
 **End**
 ```
-agent: /org update
-org:   Nothing missed. Session committed 5 decisions.
+agent: /signals update
+signals: Nothing missed. Session committed 5 decisions.
 ```
 
 **Override — later session**
 ```
-dev: /org go upmarket: target mid-size companies, SSO required
+dev: /signals go upmarket: target mid-size companies, SSO required
 CEO:  ceo#audience-smb → #audience-midmarket. Affects 3 decisions below.
 PM:   #signup-2-screens no longer matters — admins invite users. Keep #google-signup for small orgs?
 Arch: Self-hosted SAML is heavy; ceo#infra-budget blocks hosted vendors (~$400/mo).
 
-dev: /org update
-org: Override review — all or nothing
+dev: /signals update
+signals: Override review — all or nothing
   1. ceo#audience-midmarket                 accept / edit / cancel all
   2. ceo#infra-budget → $500/mo             a) raise  b) keep, self-host SAML
   3. pm/onboarding#signup-2-screens         a) retire  b) keep
   4. pm/onboarding#google-signup            a) keep  b) retire
 dev: accept · 2a · 3a · 4a
-org: Committed 4 edits as one change.
+signals: Committed 4 edits as one change.
 ```
 
 **Drift**
 ```
-dev: /org drift arch/auth
-org: ✓ #server-sessions  ✓ #session-expiry-30d
+dev: /signals drift arch/auth
+signals: ✓ #server-sessions  ✓ #session-expiry-30d
      ✗ #oauth-no-token-storage — src/auth/google.ts:41 saves accessToken
        a) fix code (build/steer)   b) amend decision (review)
 dev: a
@@ -218,7 +218,7 @@ dev: a
 
 ## 9. Simplest form to test
 
-- One skill `org/SKILL.md`: the 5 commands, the executive test, routing rules, decision template, response formats.
+- One skill `signals/SKILL.md`: the 5 commands, the executive test, routing rules, decision template, response formats.
 - Seed `.decisions/` with `map.md`, `ceo.md`, `pm/onboarding.md`, `arch/auth.md`, `arch/data.md` (~6 decisions).
 - Test: replay the mock session above. Check:
   1. answers cite decisions or say undecided
