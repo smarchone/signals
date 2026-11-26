@@ -1,6 +1,6 @@
 # Testing the org skill
 
-Start Claude Code inside `org/` so `.claude/skills/org` is picked up. Run the steps in order.
+Start Claude Code inside `test/`. `test/.claude/skills/org` is a symlink to `../skills/org`, so edits to the skill are picked up directly. Run the steps in order.
 
 ## Seed state
 
@@ -36,4 +36,4 @@ Start Claude Code inside `org/` so `.claude/skills/org` is picked up. Run the st
 6. Drift finds the planted mismatch with `file:line`.
 7. Committed records fill every template field with real content.
 
-Reset: restore `.decisions/` from git, or re-copy the seed.
+Reset: `git checkout -- .decisions src && git clean -fd .decisions` (from `test/`).

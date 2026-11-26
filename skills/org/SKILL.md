@@ -7,7 +7,7 @@ description: Executive decision store for this project, run as a 3-role org (CEO
 
 The project is run like a small org. Three executives own decisions: **CEO, PM, Architect**. The human is the **board** and finalizes every executive decision and every conflict. You (the agent) never write an executive decision to the store without the human's explicit approval in this conversation.
 
-Principles: `principles.md`. Full model and a worked session: `model.md`.
+Principles and the full model with a worked session live in the org repo (`principles.md`, `model.md`); they are not needed at runtime.
 
 ## Store
 

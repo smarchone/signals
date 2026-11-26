@@ -20,11 +20,12 @@ A Claude Code skill that keeps the **executive decisions** of a project (CEO, PM
 
 ## Install
 
-1. Copy the skill into your project (or into `~/.claude/skills/` for all projects):
+1. Copy `skills/org` to wherever your agent loads skills from. For Claude Code, per project (or `~/.claude/skills/` for all projects):
    ```sh
    mkdir -p <your-project>/.claude/skills
-   cp -r .claude/skills/org <your-project>/.claude/skills/
+   cp -r skills/org <your-project>/.claude/skills/
    ```
+   Other agents: point them at `skills/org/SKILL.md` (e.g. reference it from `AGENTS.md`).
 2. Create an empty store in your project:
    ```sh
    cd <your-project>
@@ -34,19 +35,18 @@ A Claude Code skill that keeps the **executive decisions** of a project (CEO, PM
    ```
 3. Start Claude Code in the project and run `/org ctx "<your first task>"`. Commit `.decisions/` to git.
 
-The `.decisions/` folder in this repo is an example seed for testing, not something to copy into a real project.
-
 ## Try it here
 
-Start Claude Code inside this folder and follow `TEST.md`. To reset between runs, first run `git init && git add -A && git commit -m seed`, then restore `.decisions/` from git.
+Start Claude Code inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.decisions/` is an example seed — not something to copy into a real project.
 
 ## Files
 
 | File | What |
 |---|---|
-| `.claude/skills/org/SKILL.md` | the skill |
-| `.decisions/` | example decision store |
-| `src/auth/session.ts` | fixture with a planted drift |
+| `skills/org/SKILL.md` | the skill (agent-agnostic) |
 | `model.md` | how the system works, with a mock session |
 | `principles.md` | why it is designed this way |
-| `TEST.md` | test script and pass criteria |
+| `test/TEST.md` | test script and pass criteria |
+| `test/.decisions/` | example decision store |
+| `test/src/auth/session.ts` | fixture with a planted drift |
+| `test/.claude/skills/org` | symlink → `skills/org` |
