@@ -49,4 +49,5 @@ Start Claude Code inside `test/` and follow `test/TEST.md`. The skill is symlink
 | `test/TEST.md` | test script and pass criteria |
 | `test/.decisions/` | example decision store |
 | `test/src/auth/session.ts` | fixture with a planted drift |
-| `test/.claude/skills/org` | symlink → `skills/org` |
+| `test/.claude/skills/org` | symlink → `skills/org` (Claude Code) |
+| `test/.agents/skills/org` | symlink → `skills/org` (other agents) |

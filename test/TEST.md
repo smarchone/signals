@@ -1,6 +1,6 @@
 # Testing the org skill
 
-Start Claude Code inside `test/`. `test/.claude/skills/org` is a symlink to `../skills/org`, so edits to the skill are picked up directly. Run the steps in order.
+Start your agent inside `test/`. `test/.claude/skills/org` (Claude Code) and `test/.agents/skills/org` (other agents) are symlinks to `../skills/org`, so edits to the skill are picked up directly. Run the steps in order.
 
 ## Seed state
 
