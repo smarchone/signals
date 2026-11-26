@@ -85,11 +85,12 @@ Concurrent users > 50k, or a mobile app enters scope.
 |---|---|---|
 | `/org ctx <task>` | loads relevant decisions along the partition path; surfaces unreviewed drafts | — |
 | `/org <question>` | relevant roles answer, per role, 1–2 lines each | — |
+| `/org panel <topic>` | all three roles discuss (CEO → PM → Architect, 2–4 lines each), grounded in the store; agreed points become drafts | via `/org update` |
 | `/org update` | scans the conversation so far for executive decisions not yet recorded | batch |
 | `/org update <decision>` | proposes one decision | interactive, immediate |
 | `/org drift [partition]` | checks decisions against the code | each mismatch → `/org update` |
 
-- **Dev invokes** for planning, questions, drift.
+- **Dev invokes** for planning, questions, panels, drift. Use intuition-panel for raw ideas before a store exists; `/org panel` once it does.
 - **Agent invokes on its own** during build and steer, triggered by the skill description. The closing `/org update` scan is the backstop for misses.
 - The agent must `/org <question>` before `/org update <x>`, so it doesn't propose what's already decided.
 

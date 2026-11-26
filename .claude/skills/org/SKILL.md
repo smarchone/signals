@@ -1,6 +1,6 @@
 ---
 name: org
-description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .decisions/. Use when the user runs /org (ctx, a question, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /org update before relying on a new executive decision.
+description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .decisions/. Use when the user runs /org (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /org update before relying on a new executive decision.
 ---
 
 # org
@@ -78,6 +78,34 @@ Example output:
 **Architect:** `arch/auth#server-sessions` holds — store provider id only.
 If the question reveals a conflict, say so in the relevant role's line and offer the choice. Use the panel freely during planning; during build, ask it **before** making any executive choice.
 
+### `/org panel <topic>` — discussion
+A rapid-fire discussion between all three roles, grounded in the store. Use it to explore an open question, a trade-off, or an override before deciding.
+
+Each turn, all three speak, in this order:
+- **CEO** takes a stance or reframes: direction, audience, budget, non-goals.
+- **PM** says what it means for the user, with a concrete example.
+- **Architect** states how it works or the hard limit it hits, with a mechanism or a number.
+
+Rules:
+- 2–4 lines per role. Strong stances, never vague. A role may ask the user one sharp question.
+- Every stance either cites a decision (`ceo#audience-smb`) or is marked *Suggestion:*. Never present a suggestion as decided.
+- Flag a conflict with a stored decision as soon as it comes up: `⚠ would break <partition#slug>`.
+- When the user agrees to something executive, it becomes a draft. Track drafts across turns.
+- Detail level is the decision level: enough to fill what / why / why-not. Not implementation.
+- An optional small ASCII diagram, only if it shows something new.
+
+Output exactly this, as markdown (not a code block), then stop and wait for the user:
+
+**CEO:** <stance, 2–4 lines>
+
+**PM:** <user impact with a concrete example, 2–4 lines>
+
+**Architect:** <mechanism, number or hard limit, 2–4 lines; optional diagram>
+
+**Your move:** <2–3 concrete directions> · 📝 <n> drafts (`partition#slug`, …)
+
+No headings, numbering, or other speaker names. The panel ends when the user runs `/org update` (batch review of the drafts) or moves on; drafts are written to `session/` so they are not lost.
+
 ### `/org update` (no argument) — batch
 1. Scan the conversation since the last update for executive decisions: agreed in discussion, implied by the plan, given as steers, or made by you.
 2. Skip anything already committed or rejected this session. Drop details.
@@ -113,7 +141,7 @@ A conflict is a forced choice for the human: `a) keep existing, change approach`
 ### Overrides
 When a decision would override or invalidate decisions below it (any change to a CEO decision, or a decision others `Serve`):
 1. Find every decision whose `Serves` points at it, transitively.
-2. Run a short panel: each affected role states in 1–2 lines what changes for its decisions.
+2. Run a `/org panel` turn on the override: each role states what changes for its affected decisions.
 3. Show one review listing the override and every affected decision with options.
 4. **All or nothing:** commit the override and all downstream edits together, or none. If the human cancels, nothing changes.
 
@@ -171,6 +199,7 @@ Changing a decision: edit it in place, update **By**/**Context**, and add the ol
 
 ## Response rules
 - Answers: per role, only owning roles, 1–2 lines. **Bold role name**, empty line between roles.
+- Panel: all three roles, CEO → PM → Architect, 2–4 lines each, then **Your move:**.
 - Reviews: per decision, grouped by partition, conflicts first.
 - Non-executive update: one line, then continue.
 - Never write to partition files without explicit approval in this conversation.

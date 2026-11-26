@@ -13,6 +13,7 @@ A Claude Code skill that keeps the **executive decisions** of a project (CEO, PM
 |---|---|
 | `/org ctx <task>` | load the decisions relevant to a task |
 | `/org <question>` | ask; the owning roles answer from the store |
+| `/org panel <topic>` | discuss; CEO, PM and Architect debate, grounded in the store, and agreed points become drafts |
 | `/org update` | batch-review executive decisions from the conversation so far |
 | `/org update <decision>` | propose one decision (interactive) |
 | `/org drift [partition]` | check decisions against the code |
