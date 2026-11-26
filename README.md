@@ -1,6 +1,6 @@
 # org
 
-A Claude Code skill that keeps the **executive decisions** of a project (CEO, PM, Architect) in markdown files, so they survive across sessions and drive planning, building and steering.
+An agent skill that keeps the **executive decisions** of a project (CEO, PM, Architect) in markdown files, so they survive across sessions and drive planning, building and steering.
 
 - Each decision is owned by one role and lives in one small partition (`pm/onboarding`, `arch/auth`, …).
 - The coding agent asks the store before choosing and proposes new executive decisions while it works.
@@ -20,24 +20,24 @@ A Claude Code skill that keeps the **executive decisions** of a project (CEO, PM
 
 ## Install
 
-1. Copy `skills/org` to wherever your agent loads skills from. For Claude Code, per project (or `~/.claude/skills/` for all projects):
+Works with any coding agent that supports skills (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, …).
+
+1. Install the skill with [`skills`](https://github.com/vercel-labs/skills), from your project root:
    ```sh
-   mkdir -p <your-project>/.claude/skills
-   cp -r skills/org <your-project>/.claude/skills/
+   npx skills add smarchone/org
    ```
-   Other agents: point them at `skills/org/SKILL.md` (e.g. reference it from `AGENTS.md`).
+   Add `-g` to install it for all projects. The CLI asks which agents to install for.
 2. Create an empty store in your project:
    ```sh
-   cd <your-project>
    mkdir -p .decisions/pm .decisions/arch .decisions/session
    printf '# Partition map\n\nCEO sits above PM and Architect. PM and Architect are peers.\n\n| Partition | Role | Owns |\n|---|---|---|\n| `ceo` | CEO | mission, audience, non-goals, budget, big bets |\n' > .decisions/map.md
    printf '# CEO\n' > .decisions/ceo.md
    ```
-3. Start Claude Code in the project and run `/org ctx "<your first task>"`. Commit `.decisions/` to git.
+3. Start your agent in the project and run `/org ctx "<your first task>"` (or ask it to use the `org` skill if it has no slash commands). Commit `.decisions/` to git.
 
 ## Try it here
 
-Start Claude Code inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.decisions/` is an example seed — not something to copy into a real project.
+Start your agent inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.decisions/` is an example seed — not something to copy into a real project.
 
 ## Files
 
