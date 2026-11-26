@@ -1,6 +1,6 @@
 ---
 name: signals
-description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .decisions/. Use when the user runs /signals (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /signals update before relying on a new executive decision.
+description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .signals/. Use when the user runs /signals (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /signals update before relying on a new executive decision.
 ---
 
 # signals
@@ -12,18 +12,23 @@ Principles and the full model with a worked session live in the signals repo (`p
 ## Store
 
 ```
-.decisions/
-  map.md                     # partition tree + what each partition owns (itself a decision)
-  ceo.md                     # CEO, single partition
-  pm/<area>.md               # PM partitions (product areas)
-  arch/<area>.md             # Architect partitions (technical areas)
-  session/<date>-<task>.md   # drafts awaiting review
+.signals/
+  map.md                     # every file in the store, one line each: what it owns
+  vocab.md                   # shared terms; every role and every decision follows them
+  ceo/business.md            # CEO main: brief + decisions
+  pm/product.md              # PM main: brief + decisions
+  pm/ui.md                   # PM partition, default: surfaces clutter product.md fast
+  arch/architecture.md       # Architect main: brief + decisions
+  <role>/<area>.md           # more partitions, added through review
+  session/<date>-<task>.md   # drafts awaiting review (written by /signals update only)
 ```
 
-- **Reference** a decision as `partition#slug`, where `partition` is the file path under `.decisions/` without `.md` (`ceo`, `pm/onboarding`, `arch/auth`) and `slug` is its `##` heading. Example: `arch/auth#server-sessions`.
-- **Hierarchy:** CEO is above PM and Architect. PM and Architect are peers. Lower decisions must fit the constraints of the decisions they serve.
-- **Invariant:** the store never contains a conflict. No two live decisions contradict each other.
-- **Empty store:** if `.decisions/` or `map.md` is missing, say the store is empty and carry on. The first review proposes a starter `map.md` (partitions `ceo`, `pm/*`, `arch/*`) and `ceo.md` alongside the first decisions; create the folders when writing.
+These are good defaults, not a fixed layout: any file can be added, renamed or merged through review.
+
+- **Reference** a decision as `partition#slug`, where `partition` is the file path under `.signals/` without `.md` and `slug` is its `##` heading. Example: `arch/architecture#server-sessions`. A term is `vocab#<term>`.
+- **Hierarchy:** CEO is above PM and Architect. PM and Architect are peers. Lower decisions must fit the constraints of the decisions they serve. Everything follows `vocab.md`.
+- **Invariant:** the store never contains a conflict. No two live decisions contradict each other, and no brief contradicts a decision.
+- **Empty store:** if `.signals/` or `map.md` is missing, say the store is empty and carry on. The first review creates the default files alongside the first decisions (file formats under **Store files** below).
 
 ## Roles
 
@@ -33,36 +38,40 @@ Principles and the full model with a worked session live in the signals repo (`p
 | PM | what is built: feature scope, user-facing rules and behavior |
 | Architect | how it is built: stack, data, boundaries, invariants, security posture |
 
-Roles are lenses, not agents. "PM answers" means: you read the PM partitions and answer as their owner.
+Roles are lenses, not agents. "PM answers" means: you read the PM files and answer as their owner.
 
 **Grounding rule:** a role answers only from stored decisions and cites them (`pm/onboarding#email-signup-v1`). If nothing covers it, the role says **Undecided** and names the nearest decision. Never invent a position and present it as decided. A role may *suggest* an option, labeled as a suggestion.
 
 ## Executive test
 
 A decision is executive (store it) if either is true:
-1. Rebuilding the project from `.decisions/` alone would get this wrong without it.
+1. Rebuilding the project from `.signals/` alone would get this wrong without it.
 2. Changing it later would require the CEO, PM or Architect to decide again.
 
 Otherwise it is a **detail** (library choice inside agreed stack, naming, file layout, retries, test tooling): never stored, you just proceed.
 
 ## Routing
 
-Put a decision in the **lowest partition that covers everything it touches**.
-- One area → that partition file.
-- Several areas of one role → that role's most general partition (add it to `map.md` if missing, as a reviewed decision).
-- Spans PM and Architect → split into a linked pair (one decision in each, each `Serves` the other) or put the driving decision in the owner's partition. Show both in one review.
-- If no partition fits, propose a new partition in `map.md` in the same review.
+Each role has a **main** file, always loaded, and **partitions**, loaded only when a task touches them.
+
+> Main holds what every task in that role must know. A partition holds what only some tasks need.
+
+- A decision that binds most of the role's work → its main file. One area → that area's partition; if the area has none yet, main until a split is worth it (below), unless the human asks for the partition.
+- **Any role can add partitions** (`ceo/<area>`, `pm/<area>`, `arch/<area>`), always through review: a `map.md` line plus the file.
+- Spans PM and Architect → split into a linked pair (one decision in each, each `serves` the other) or put the driving decision in the owner's file. Show both in one review.
+- **Splitting:** no size limit. When main holds a cluster (~3) of decisions about one area that most tasks don't need, propose moving them to a new partition in the next review: a `map.md` line plus the moves, references updated in the same commit.
+- A new term, or a decision that uses a term differently from `vocab.md`, adds or changes the term in the same review. Renaming a term is an override.
 
 ## Commands
 
 ### `/signals ctx <task>`
 1. Read `map.md`, pick the partitions the task touches.
-2. Load `ceo.md` + those partitions + partitions they `Serve`.
+2. Load `vocab.md` + the three main files + those partitions + files they `serve`.
 3. List any files in `session/` with unreviewed drafts.
 4. Output:
 ```
 signals: Partitions: pm/onboarding, arch/auth · loaded 6 decisions
-     ceo#audience-smb · ceo#infra-budget · pm/onboarding#email-signup-v1 · …
+     ceo/business#audience-smb · ceo/business#infra-budget · pm/onboarding#email-signup-v1 · …
      ⚠ task touches pm/onboarding#email-signup-v1  (one line per decision the task may change)
      📝 3 unreviewed drafts from "google login" (2026-11-26) — review now?
 ```
@@ -74,7 +83,7 @@ Format as markdown (not a code block): role name in bold, followed by a colon, a
 
 Example output:
 
-**PM:** Undecided. `pm/onboarding#email-signup-v1` covered v1 only. Fits `ceo#audience-smb`.
+**PM:** Undecided. `pm/onboarding#email-signup-v1` covered v1 only. Fits `ceo/business#audience-smb`.
 
 **Architect:** `arch/auth#server-sessions` holds — store provider id only.
 If the question reveals a conflict, say so in the relevant role's line and offer the choice. Use the panel freely during planning; during build, ask it **before** making any executive choice.
@@ -89,9 +98,9 @@ Each turn, all three speak, in this order:
 
 Rules:
 - 2–4 lines per role. Strong stances, never vague. A role may ask the user one sharp question.
-- Every stance either cites a decision (`ceo#audience-smb`) or is marked *Suggestion:*. Never present a suggestion as decided.
+- Every stance either cites a decision (`ceo/business#audience-smb`) or is marked *Suggestion:*. Never present a suggestion as decided.
 - Flag a conflict with a stored decision as soon as it comes up: `⚠ would break <partition#slug>`.
-- When the user agrees to something executive, it becomes a draft. Track drafts across turns.
+- When the user agrees to something executive, it becomes a draft. Track drafts in the conversation only: no file writes, no `/signals update <decision>` calls, no per-decision review during the panel.
 - Detail level is the decision level: enough to fill what / why / why-not. Not implementation.
 - An optional small ASCII diagram, only if it shows something new.
 
@@ -105,7 +114,7 @@ Output exactly this, as markdown (not a code block), then stop and wait for the 
 
 **Your move:** <2–3 concrete directions> · 📝 <n> drafts (`partition#slug`, …)
 
-No headings, numbering, or other speaker names. The panel ends when the user runs `/signals update` (batch review of the drafts) or moves on; drafts are written to `session/` so they are not lost.
+No headings, numbering, or other speaker names. The panel ends when the user runs `/signals update`, says the discussion is done, or moves on to building. Only then run the batch update once: write all drafts to `session/` and show one review.
 
 ### `/signals update` (no argument) — batch
 1. Scan the conversation since the last update for executive decisions: agreed in discussion, implied by the plan, given as steers, or made by you.
@@ -123,7 +132,7 @@ Use this after planning, and once at the end of build/steer as a backstop.
 4. Show a one-item review with 🔒 and **stop working on anything that depends on it** until the human answers.
 5. On approval, commit immediately.
 
-You call this on your own during build and steering. A user steer that sets or changes an executive choice → call it right away, before acting on the steer.
+You call this on your own during build and steering. A user steer that sets or changes an executive choice → call it right away, before acting on the steer. **Not during a panel:** there, steers become drafts for the closing batch update.
 
 ### `/signals drift [partition]`
 1. For each decision in scope (all partitions if none given), check the code under its `Scope` against its **What**.
@@ -134,14 +143,14 @@ You call this on your own during build and steering. A user steer that sets or c
 
 Before proposing any decision, check it against:
 - decisions in the same partition,
-- every decision it `Serves` and every decision above it (CEO always),
+- every decision it `serves` and every decision above it (CEO always),
 - peer decisions it touches (PM ↔ Architect).
 
 A conflict is a forced choice for the human: `a) keep existing, change approach` / `b) replace existing`. Never resolve a conflict yourself. Never let the higher role win automatically. Show conflicts first in any review.
 
 ### Overrides
 When a decision would override or invalidate decisions below it (any change to a CEO decision, or a decision others `Serve`):
-1. Find every decision whose `Serves` points at it, transitively.
+1. Find every decision whose `serves` points at it, transitively.
 2. Run a `/signals panel` turn on the override: each role states what changes for its affected decisions.
 3. Show one review listing the override and every affected decision with options.
 4. **All or nothing:** commit the override and all downstream edits together, or none. If the human cancels, nothing changes.
@@ -157,50 +166,94 @@ Plan review (3) · 1 conflict
    a) keep decision, change approach   b) replace decision
 
 pm/onboarding · NEW #google-signup
-   Google signup alongside email. serves ceo#audience-smb
+   Google signup alongside email. serves ceo/business#audience-smb
    why: SMB users live in Google Workspace · why-not: Microsoft (low demand)
 
 arch/auth · NEW #session-expiry-30d
-   Sessions expire after 30 days idle. serves ceo#audience-smb
+   Sessions expire after 30 days idle. serves ceo/business#audience-smb
    why: SMB users hate re-login · why-not: 7d (friction)
 
 answer: approve all / pick / edit <slug> / reject <slug> · conflicts need a choice
 ```
-Review shows a summary. The committed record is the full template below.
+Review shows a summary. The committed record uses the template below.
 
 ## Decision record
 
-Every field carries real information. Decisions drive later decisions.
+Compact: every line is read on every load, so it carries only what later reasoning needs.
 
 ```md
 ## <slug>
-
-**What**
-Precise enough to rebuild from and to check against code. 2–4 lines.
-
-**Why**
-- The forces behind it, each linked to decisions it serves where possible.
-
-**Why not**
-- <alternative> — reason it lost.
-
-**Implications**
-- What this constrains downstream, with links to affected decisions.
-
-**Revisit when**
-Concrete trigger that should reopen it.
-
-**Serves**   <partition#slug> · …
-**Scope**    <partition> · code: <globs>
-**By**       <dev | agent-proposed> · dev-approved · <YYYY-MM-DD>
-**Context**  Session "<task>", <plan | build | steer | drift>. One line on how it was decided.
+<What: precise enough to rebuild from and check code against. 1–3 lines, numbers and limits included.>
+- why: <forces, `;`-separated, linking what it serves>
+- not: <alternative> (<why it lost>) · …
+- revisit: <concrete trigger>            # optional
+- serves: <partition#slug> · … | — · code: <globs> · by: <dev | agent> · <YYYY-MM-DD>
 ```
 
-Changing a decision: edit it in place, update **By**/**Context**, and add the old position to **Why not** (`<old position> — replaced <date>: <reason>`). Renaming a slug: update every reference in the same commit.
+Example:
+
+```md
+## no-accounts-static
+v1: no accounts, login or server-side visitor state. Seen-dreams live in localStorage. Static site on a CDN, no backend.
+- why: zero friction (ceo/business#feel-not-do); no personal data to leak; ~$0 to run
+- not: accounts (friction, data liability) · backend for visitor state (nothing needs it)
+- revisit: visitors want cross-device favorites, or a feature needs server state
+- serves: pm/ui#browse-or-surprise · ceo/business#feel-not-do · code: all · by: dev+agent · 2026-11-26
+```
+
+- No implications, context or history fields. Downstream effects are found by following `serves` backwards; a hard constraint on others belongs in the What.
+- Every word earns its place: no restating the slug, no prose transitions.
+- `by: agent` means agent-proposed; every stored decision is dev-approved by definition.
+
+Changing a decision: edit it in place, update the date, and append the old position to `not:` as `<old> (replaced <date>: <reason>)`. Renaming a slug: update every reference in the same commit.
+
+## Store files
+
+**Main files** open with a brief: the project in ~10 lines from that role's view. Each line points at the decision behind it; a brief never adds a rule of its own. Any commit that changes a decision updates the brief lines that cite it. Omit a brief section until a decision fills it.
+
+```md
+# CEO · business
+## Brief
+- problem: <current pain> (ceo/business#slug)
+- for whom: <first user>
+- why this wins: <edge>
+## Decisions
+## <slug>
+…
+```
+
+| File | Brief sections |
+|---|---|
+| `ceo/business.md` | problem · for whom · why this wins · non-goals |
+| `pm/product.md` | core loop · the moment · non-goals |
+| `pm/ui.md` | surfaces · feel |
+| `arch/architecture.md` | shape (domains in the middle, adapters at the edge) · hard lines |
+
+Partitions have no brief: `# <Role> · <area>`, a `> <what it owns>` line, then decisions.
+
+`vocab.md` is a table, not decision records:
+
+```md
+# Vocab
+| Term | What it is | Why it must exist |
+|---|---|---|
+| **Dream** | one curated world evoking one feeling | the unit of the catalog |
+```
+
+`map.md` lists every file, one line each:
+
+```md
+# Map
+- `vocab`: shared terms
+- `ceo/business`: why it exists, who for, non-goals, quality bar, budget
+- `pm/product`: behavior, rules, core loop
+- `pm/ui`: surfaces, feel, user-facing wording
+- `arch/architecture`: stack, data, boundaries, budgets, hard lines
+```
 
 ## Response rules
 - Answers: per role, only owning roles, 1–2 lines. **Bold role name**, empty line between roles.
-- Panel: all three roles, CEO → PM → Architect, 2–4 lines each, then **Your move:**.
+- Panel: all three roles, CEO → PM → Architect, 2–4 lines each, then **Your move:**. No store writes until the panel ends.
 - Reviews: per decision, grouped by partition, conflicts first.
 - Non-executive update: one line, then continue.
 - Never write to partition files without explicit approval in this conversation.

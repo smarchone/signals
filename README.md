@@ -44,7 +44,7 @@ npx skills add smarchone/signals -g
 
 ## Try it here
 
-Start your agent inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.decisions/` is an example seed — not something to copy into a real project.
+Start your agent inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.signals/` is an example seed — not something to copy into a real project.
 
 ## License
 

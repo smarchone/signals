@@ -10,7 +10,7 @@
 ## 1. Store
 
 ```
-.decisions/
+.signals/
   map.md                     # partition tree (itself a decision)
   ceo.md                     # CEO — single partition
   pm/<area>.md               # PM, partitioned by product area (onboarding, billing…)
@@ -219,7 +219,7 @@ dev: a
 ## 9. Simplest form to test
 
 - One skill `signals/SKILL.md`: the 5 commands, the executive test, routing rules, decision template, response formats.
-- Seed `.decisions/` with `map.md`, `ceo.md`, `pm/onboarding.md`, `arch/auth.md`, `arch/data.md` (~6 decisions).
+- Seed `.signals/` with `map.md`, `ceo.md`, `pm/onboarding.md`, `arch/auth.md`, `arch/data.md` (~6 decisions).
 - Test: replay the mock session above. Check:
   1. answers cite decisions or say undecided
   2. non-executive updates are dropped
