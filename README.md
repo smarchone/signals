@@ -2,55 +2,47 @@
 
 An agent skill that keeps the **executive decisions** of a project (CEO, PM, Architect) in markdown files, so they survive across sessions and drive planning, building and steering.
 
-- Each decision is owned by one role and lives in one small partition (`pm/onboarding`, `arch/auth`, …).
-- The coding agent asks the store before choosing and proposes new executive decisions while it works.
-- You approve every executive decision and resolve every conflict. Details are left to the agent and never stored.
-- Plans are reviewed in a batch; build and steer decisions are reviewed interactively.
+- Role-owned decisions (CEO, PM, Architect) in small partitions
+- Agent checks the store before making a choice
+- Agent-proposed, human-approved decisions
+- Conflicts surfaced, never auto-resolved
+- Batch review for plans, interactive review while building
 
-## Commands
+## Usage
 
-| Command | Does |
-|---|---|
-| `/org ctx <task>` | load the decisions relevant to a task |
-| `/org <question>` | ask; the owning roles answer from the store |
-| `/org panel <topic>` | discuss; CEO, PM and Architect debate, grounded in the store, and agreed points become drafts |
-| `/org update` | batch-review executive decisions from the conversation so far |
-| `/org update <decision>` | propose one decision (interactive) |
-| `/org drift [partition]` | check decisions against the code |
+Say you're adding password reset. Before you start, get the decisions it touches:
+
+```
+/org ctx "add password reset"
+```
+
+Midway, you wonder why login works the way it does:
+
+```
+/org why server sessions and not JWT?
+```
+
+While building, you decide something the store should keep:
+
+```
+/org update "sessions expire after 30 days idle"
+```
+
+When the plan or session is done, review everything it settled in one batch:
+
+```
+/org update
+```
 
 ## Install
 
-Works with any coding agent that supports skills (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, …).
-
-1. Install the skill with [`skills`](https://github.com/vercel-labs/skills), from your project root:
-   ```sh
-   npx skills add smarchone/org
-   ```
-   Add `-g` to install it for all projects. The CLI asks which agents to install for.
-2. Create an empty store in your project:
-   ```sh
-   mkdir -p .decisions/pm .decisions/arch .decisions/session
-   printf '# Partition map\n\nCEO sits above PM and Architect. PM and Architect are peers.\n\n| Partition | Role | Owns |\n|---|---|---|\n| `ceo` | CEO | mission, audience, non-goals, budget, big bets |\n' > .decisions/map.md
-   printf '# CEO\n' > .decisions/ceo.md
-   ```
-3. Start your agent in the project and run `/org ctx "<your first task>"` (or ask it to use the `org` skill if it has no slash commands). Commit `.decisions/` to git.
+```sh
+npx skills add smarchone/org
+```
 
 ## Try it here
 
 Start your agent inside `test/` and follow `test/TEST.md`. The skill is symlinked in, and `test/.decisions/` is an example seed — not something to copy into a real project.
-
-## Files
-
-| File | What |
-|---|---|
-| `skills/org/SKILL.md` | the skill (agent-agnostic) |
-| `model.md` | how the system works, with a mock session |
-| `principles.md` | why it is designed this way |
-| `test/TEST.md` | test script and pass criteria |
-| `test/.decisions/` | example decision store |
-| `test/src/auth/session.ts` | fixture with a planted drift |
-| `test/.claude/skills/org` | symlink → `skills/org` (Claude Code) |
-| `test/.agents/skills/org` | symlink → `skills/org` (other agents) |
 
 ## License
 
