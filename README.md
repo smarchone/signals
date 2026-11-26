@@ -56,4 +56,4 @@ Start Claude Code inside `test/` and follow `test/TEST.md`. The skill is symlink
 
 Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Saikumar Chintada. See [NOTICE](NOTICE).
 
-You may use, modify and redistribute this skill, including commercially. Redistributions must keep the LICENSE and NOTICE files and state any significant changes you made. The software is provided "as is", without warranty.
+You may use, modify and redistribute this skill, including commercially. Redistributions and derivative works must keep the LICENSE and NOTICE files, keep attribution to the original author, and state any significant changes you made. The software is provided "as is", without warranty.

@@ -1,5 +1,13 @@
 org
 Copyright 2026 Saikumar Chintada
 
-This product is licensed under the Apache License, Version 2.0.
-See the LICENSE file for the full license text.
+This product includes software developed by Saikumar Chintada
+(https://github.com/smarchone/org).
+
+org: an executive decision store for coding agents. Decisions are owned
+by a CEO, PM and Architect, kept in .decisions/, and approved by a human
+before they drive planning, building and steering.
+
+Redistributions and derivative works must retain this NOTICE file
+and attribution to the original author, per Section 4(d) of the
+Apache License, Version 2.0.
