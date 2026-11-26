@@ -51,3 +51,9 @@ Start Claude Code inside `test/` and follow `test/TEST.md`. The skill is symlink
 | `test/src/auth/session.ts` | fixture with a planted drift |
 | `test/.claude/skills/org` | symlink → `skills/org` (Claude Code) |
 | `test/.agents/skills/org` | symlink → `skills/org` (other agents) |
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Saikumar Chintada. See [NOTICE](NOTICE).
+
+You may use, modify and redistribute this skill, including commercially. Redistributions must keep the LICENSE and NOTICE files and state any significant changes you made. The software is provided "as is", without warranty.
