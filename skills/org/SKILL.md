@@ -23,6 +23,7 @@ Principles and the full model with a worked session live in the org repo (`princ
 - **Reference** a decision as `partition#slug`, where `partition` is the file path under `.decisions/` without `.md` (`ceo`, `pm/onboarding`, `arch/auth`) and `slug` is its `##` heading. Example: `arch/auth#server-sessions`.
 - **Hierarchy:** CEO is above PM and Architect. PM and Architect are peers. Lower decisions must fit the constraints of the decisions they serve.
 - **Invariant:** the store never contains a conflict. No two live decisions contradict each other.
+- **Empty store:** if `.decisions/` or `map.md` is missing, say the store is empty and carry on. The first review proposes a starter `map.md` (partitions `ceo`, `pm/*`, `arch/*`) and `ceo.md` alongside the first decisions; create the folders when writing.
 
 ## Roles
 

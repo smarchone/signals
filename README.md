@@ -37,7 +37,7 @@ When the plan or session is done, review everything it settled in one batch:
 ## Install
 
 ```sh
-npx skills add smarchone/org
+npx skills add smarchone/org -g
 ```
 
 ## Try it here
