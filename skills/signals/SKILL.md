@@ -1,6 +1,6 @@
 ---
 name: signals
-description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .signals/. Use when the user runs /signals (ctx, a question, panel, update, drift). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /signals update before relying on a new executive decision.
+description: Executive decision store for this project, run as a 3-role org (CEO, PM, Architect) over markdown files in .signals/. Use when the user runs /signals (ctx, a question, panel, update, drift, explain). ALSO use it on your own, without being asked, during build and steering, whenever (a) you are about to make a choice a CEO, PM or Architect would own (product scope, user-facing rules, budget, stack, data model, boundaries, security posture), (b) the user steers you in a way that sets or changes such a choice, or (c) your build deviates from a stored decision. Ask the store before choosing; propose with /signals update before relying on a new executive decision.
 ---
 
 # signals
@@ -138,6 +138,9 @@ You call this on your own during build and steering. A user steer that sets or c
 1. For each decision in scope (all partitions if none given), check the code under its `Scope` against its **What**.
 2. Report ✓ / ✗ per decision, with `file:line` evidence for ✗.
 3. For each ✗ offer: `a) fix code` (becomes a build task; continue with build/steer) or `b) amend decision` (goes through `/signals update <decision>`).
+
+### `/signals explain [area]` — experimental
+Explain why the project (or one area) is the way it is, for a human being onboarded or taking over. Read-only, terminal output. Read `explain.md` in this skill's folder and follow it.
 
 ## Conflicts
 
