@@ -12,29 +12,27 @@ Why: [Steer decisions, not prompts](https://smarchone.github.io/signals/blog.htm
 
 ## Usage
 
-Say you're adding password reset. Before you start, get the decisions it touches:
-
-```
-/signals ctx "add password reset"
-```
-
-Midway, you wonder why login works the way it does:
+**Ask questions.** The roles answer from stored decisions, with citations, or say Undecided:
 
 ```
 /signals why server sessions and not JWT?
 ```
 
-While building, you decide something the store should keep:
+**Make decisions.** State one, or let the agent propose one while it builds:
 
 ```
 /signals update "sessions expire after 30 days idle"
 ```
 
-When the plan or session is done, review everything it settled in one batch:
+Executive decisions are gated: nothing lands in the store until you approve it, and the agent pauses work that depends on it until you do.
+
+**Update decisions.** The coding agent may have made executive choices of its own while building. Once the build is done, collect them in one review:
 
 ```
 /signals update
 ```
+
+You approve, drop or reword each one. If one contradicts a stored decision, it comes back as a conflict for you to resolve.
 
 ## Install
 
