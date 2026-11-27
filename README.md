@@ -10,6 +10,12 @@ An agent skill that keeps the **executive decisions** of a project (CEO, PM, Arc
 
 Why: [Steer decisions, not prompts](https://smarchone.github.io/signals/blog.html).
 
+## Install
+
+```sh
+npx skills add smarchone/signals -g
+```
+
 ## Usage
 
 **Ask questions.** The roles answer from stored decisions, with citations, or say Undecided:
@@ -34,11 +40,31 @@ Executive decisions are gated: nothing lands in the store until you approve it, 
 
 You approve, drop or reword each one. If one contradicts a stored decision, it comes back as a conflict for you to resolve.
 
-## Install
+### All commands
 
-```sh
-npx skills add smarchone/signals -g
+| Command | What it does |
+|---|---|
+| `/signals <question>` | Roles that own the topic answer from stored decisions, with citations, or say Undecided |
+| `/signals ctx <task>` | Loads the decisions a task touches and flags the ones it may change |
+| `/signals panel <topic>` | CEO, PM and Architect discuss a topic; agreed points become drafts, nothing is written yet |
+| `/signals update "<decision>"` | Proposes one decision; work that depends on it waits for your approval |
+| `/signals update` | Collects every executive decision since the last update into one review |
+| `/signals drift [partition]` | Checks code against stored decisions, with `file:line` for each mismatch |
+| `/signals explain [area]` | Explains why the project (or one area) is the way it is, for onboarding or handover. Experimental |
+
+### Examples
+
 ```
+/signals why server sessions and not JWT?
+/signals ctx "add Google login"
+/signals panel "inviting teammates"
+/signals update "sessions expire after 30 days idle"
+/signals update
+/signals drift arch/auth
+/signals explain auth
+```
+
+The agent also calls `/signals` on its own while building, whenever it is about to make an executive choice.
 
 ## Try it here
 
